@@ -123,11 +123,21 @@ void VulkanSceneRenderer::BeginFrame()
 
 void VulkanSceneRenderer::Submit(const VulkanMeshBuffer &mesh,
                                  const glm::mat4 &model, const glm::vec4 &color,
-                                 const glm::vec4 &material, bool castsShadow)
+                                 const glm::vec4 &material, bool castsShadow,
+                                 int pipelineIndex)
 {
     if (!pipeline)
         return;
-    drawCalls.push_back({&mesh, model, color, material, castsShadow});
+    drawCalls.push_back({&mesh, model, color, material, castsShadow, pipelineIndex});
+}
+
+int VulkanSceneRenderer::CreateMaterialPipeline(const std::string &shaderDir,
+                                                const std::string &vertName,
+                                                const std::string &fragName)
+{
+    if (!pipeline)
+        return -1;
+    return pipeline->CreateMaterialPipeline(shaderDir, vertName, fragName);
 }
 
 void VulkanSceneRenderer::SetLights(const LightUBO &lights)
@@ -196,7 +206,8 @@ void VulkanSceneRenderer::RecordShadow(VkCommandBuffer cmd)
                                         0, 1, &shadowDesc, 0, nullptr);
                 for (const auto &call : drawCalls)
                 {
-                    if (!call.castsShadow)
+                    // M3：自定义管线用自定义 shader，无法用 mesh.vert 的平面投影/深度，跳过
+                    if (!call.castsShadow || call.pipelineIndex != 0)
                         continue;
                     MeshPushConstants pc{};
                     pc.model = call.model;
@@ -253,7 +264,8 @@ void VulkanSceneRenderer::RecordShadow(VkCommandBuffer cmd)
                                     0, 1, &shadowDesc, 0, nullptr);
             for (const auto &call : drawCalls)
             {
-                if (!call.castsShadow)
+                // M3：自定义管线用自定义 shader，无法用 mesh.vert 的平面投影/深度，跳过
+                if (!call.castsShadow || call.pipelineIndex != 0)
                     continue;
                 MeshPushConstants pc{};
                 pc.model = call.model;
@@ -318,18 +330,47 @@ void VulkanSceneRenderer::Record(VkCommandBuffer cmd, const glm::mat4 &view, con
     // 重新绑定主 mesh 管线（RecordSkybox 已切换到天空盒管线）
     pipeline->Bind(cmd);
 
+    // M3：按 pipelineIndex 分组绘制。所有管线共享同一描述符集（相机/灯光/环境/
+    // 材质纹理 UBO 已在上方更新一次）。0 = 默认 mesh 管线，>=1 = 自定义管线。
+    std::vector<int> usedPipelines;
     for (const auto &call : drawCalls)
-    {
-        MeshPushConstants pc{};
-        pc.model = call.model;
-        pc.color = call.color;
-        pc.material = call.material;
+        if (std::find(usedPipelines.begin(), usedPipelines.end(), call.pipelineIndex) ==
+            usedPipelines.end())
+            usedPipelines.push_back(call.pipelineIndex);
+    std::sort(usedPipelines.begin(), usedPipelines.end());
 
-        vkCmdPushConstants(cmd, pipeline->GetLayout(),
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(pc), &pc);
-        call.mesh->Bind(cmd);
-        call.mesh->Draw(cmd);
+    for (int idx : usedPipelines)
+    {
+        if (idx == 0)
+        {
+            pipeline->Bind(cmd); // 默认 mesh 管线（含描述集）
+        }
+        else
+        {
+            VkPipeline cp = pipeline->GetMaterialPipeline(idx);
+            if (!cp)
+                continue;
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, cp);
+            VkDescriptorSet ds = pipeline->GetDescriptorSet();
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetLayout(),
+                                    0, 1, &ds, 0, nullptr);
+        }
+
+        for (const auto &call : drawCalls)
+        {
+            if (call.pipelineIndex != idx)
+                continue;
+            MeshPushConstants pc{};
+            pc.model = call.model;
+            pc.color = call.color;
+            pc.material = call.material;
+
+            vkCmdPushConstants(cmd, pipeline->GetLayout(),
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(pc), &pc);
+            call.mesh->Bind(cmd);
+            call.mesh->Draw(cmd);
+        }
     }
 
     // ---- 平面投影阴影（仅当无 shadow map 时作为回退） ----
@@ -351,7 +392,8 @@ void VulkanSceneRenderer::Record(VkCommandBuffer cmd, const glm::mat4 &view, con
         {
             for (const auto &call : drawCalls)
             {
-                if (!call.castsShadow)
+                // M3：自定义管线用自定义 shader，无平面投影逻辑，跳过
+                if (!call.castsShadow || call.pipelineIndex != 0)
                     continue;
 
                 MeshPushConstants pc{};

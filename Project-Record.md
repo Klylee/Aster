@@ -218,3 +218,64 @@ EnvironmentMap ──SetEnvironmentMap──▶ 后端上传（Vulkan：staging+
 - **OpenGL 路径仅 Windows 编译**：macOS 无法编译/运行 GL，OpenGL 环境功能需在
   Windows 上验证（代码已用 g++ 语法检查通过）。
 - **ImGui 遮挡 3D 视图**：截图验证时 ImGui 面板会盖住画面中心，需注意采样区域。
+
+---
+
+# 每对象材质 / 纹理 / 自定义 Shader（Vulkan，里程碑 10）
+
+在环境贴图（IBL）基础上，让 Vulkan 后端支持**每个场景对象**单独指定材质参数、
+材质纹理，乃至**自定义着色器**。分三步落地：
+
+## M1：每对象材质参数（roughness / metallic / AO）
+
+- `Material.h`：新增 `roughness / metallic / ao / textureIndex / vulkanPipeline` 成员。
+- `RenderAPI.h`：新增 `MaterialParams`（color + 上述参数 + pipelineIndex），
+  `VulkanRenderAPI::SubmitSceneMesh` 签名改为接收 `MaterialParams`。
+- push constant 扩到 **112 字节**：`mat4 model + vec4 color + vec4 shadow + vec4 material`，
+  `material = (粗糙度, 金属度, AO, 纹理索引)`（mesh.vert/frag 一致）。
+- `mesh.frag` 的 `ComputeEnvAmbient()` 改用 `pc.material.x/y/z`（每对象）而非全局 EnvUBO。
+- `Model::draw()` 从 `Material` 组装 `MaterialParams` 提交。
+- demo：球体材质用滑块控制（每对象），地面设为哑光（roughness=1）。
+
+## M2：每对象材质纹理
+
+- `VulkanPipeline`：描述符布局扩到 **12 个 binding**，binding 11 =
+  `sampler2D` 数组（`MAX_MATERIAL_TEXTURES = 16`）；描述符池 CIS 计数相应扩大。
+- `RegisterMaterialTexture(queue, pool, rgba8, w, h)`：staging 上传 RGBA8 到
+  device-local 并更新 binding 11 数组元素（主集 + 阴影集），返回索引；
+  **索引 0 恒为 1x1 白色纹理**（无纹理对象采样它 = 纯色）。
+- `mesh.frag`：`pc.material.w >= 0` 时 `texture(uMaterialTextures[idx], uv) * color`。
+  片段阶段对 sampler 数组的动态均匀索引（来自 push constant）在 Vulkan 1.0 即合法，
+  无需 descriptor indexing 扩展（MoltenVK 实测通过）。
+- demo：`BuildIcoSphere` 生成球面 UV（等距柱状），`BuildPlane` 生成平面 UV；
+  生成 256×256 棋盘纹理注册后赋给球体（地面保持纯色）。
+
+## M3：自定义 shader 管线
+
+- `VulkanPipeline::CreateMaterialPipeline(shaderDir, vertName, fragName)`：
+  用**共享**描述集布局 / push constants / 顶点布局（pos3+nor3+uv2）创建自定义
+  图形管线，返回索引（0 = 默认 mesh，自定义从 1 起）；`GetMaterialPipeline(idx)` 取用。
+- `VulkanSceneRenderer`：`DrawCall` 增加 `pipelineIndex`；`Submit` 增参；
+  `Record()` 按 `pipelineIndex` 分组绘制（所有管线共用同一描述符集，UBO 只更新一次）；
+  `RecordShadow()` / 平面阴影回退**只处理 pipelineIndex==0**（自定义 shader 无深度/投影逻辑）。
+- `VulkanRenderAPI::CreateMaterialPipeline` / `Model::draw()` 透传 `Material::vulkanPipeline`。
+- 新增 `assets/shader/vulkan/toon.vert/.frag`：卡通（cel shading）示例着色器，
+  量化漫反射 + 硬高光 + 边缘暗化；访问共享描述集的灯光 / irradiance / 材质纹理绑定。
+- `CMakeLists.txt` VULKAN_SHADERS 加入 toon.vert/toon.frag。
+- demo：创建 toon 管线赋给**地面**材质（球体仍用默认 PBR mesh shader），
+  一眼可见“地面卡通、球体 PBR”的每对象 shader 差异。
+
+## 验证
+- macOS（Vulkan / MoltenVK）实机运行无校验错误。
+- 截图：M1 地面哑光 + 球体滑块材质；M2 球体出现棋盘纹理（tint 橙色）；M3 地面出现
+  卡通分档明暗、球体保持 PBR 反射。
+
+## 说明 / 坑
+- **push constant 块必须完全一致**（mesh.vert / mesh.frag / toon.vert / toon.frag），
+  否则管线 layout 校验失败。
+- **自定义管线共享描述集**：相机/灯光/环境/材质纹理 UBO 只需更新一次；自定义 shader
+  能访问全部 binding（这是“自定义 shader”能力的来源）。
+- **阴影 pass 排除自定义管线**：自定义 shader 没有 mesh.vert 的平面投影 / depth.frag
+  深度逻辑，强投会出错，故只对默认 mesh 管线录阴影。
+- **纹理索引 0 = 白色占位**：无纹理对象采样 binding 11 数组时命中白色 → 退化为纯色，
+  避免“无纹理”与“索引越界”的未定义行为。

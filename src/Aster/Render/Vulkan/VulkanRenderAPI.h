@@ -77,6 +77,12 @@ public:
     // 注册一张 RGBA8 材质纹理（转发到场景渲染器 binding 11），返回索引（-1 失败）。
     int RegisterMaterialTexture(const uint8_t *rgba8, int width, int height);
 
+    // ---- M3：自定义 shader 管线 ----
+    // 创建自定义顶点/片元材质管线（共享描述集布局/顶点布局/push constants），
+    // 返回索引（1 起；0 = 默认 mesh 管线）。vertName/fragName 如 "toon.vert"/"toon.frag"，
+    // 从编译好的 SPIR-V 目录（VULKAN_SHADER_DIR）读取。
+    int CreateMaterialPipeline(const std::string &vertName, const std::string &fragName);
+
     RenderAPIType Type() const override { return RenderAPIType::Vulkan; }
     const char *Name() const override { return "Vulkan"; }
 

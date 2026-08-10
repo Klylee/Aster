@@ -64,6 +64,8 @@ if(ASTER_VULKAN_AVAILABLE)
             depth_point.frag
             skybox.vert
             skybox.frag
+            toon.vert
+            toon.frag
         )
         set(VULKAN_SPV_OUTPUTS "")
         foreach(SHADER ${VULKAN_SHADERS})

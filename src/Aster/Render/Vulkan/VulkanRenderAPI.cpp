@@ -962,7 +962,8 @@ void VulkanRenderAPI::SubmitSceneMesh(const Mesh &mesh, const glm::mat4 &model,
     // 材质参数 → push constant vec4（粗糙度, 金属度, AO, 纹理索引）
     glm::vec4 material(params.roughness, params.metallic, params.ao,
                        (float)params.textureIndex);
-    sceneRenderer->Submit(*mesh.vulkanBuffer, model, params.color, material, castsShadow);
+    sceneRenderer->Submit(*mesh.vulkanBuffer, model, params.color, material,
+                          castsShadow, params.pipelineIndex);
     hasSceneMesh = true;
 }
 
@@ -1015,6 +1016,14 @@ int VulkanRenderAPI::RegisterMaterialTexture(const uint8_t *rgba8, int width, in
     if (!sceneRenderer || !graphicsQueue || !commandPool)
         return -1;
     return sceneRenderer->RegisterMaterialTexture(graphicsQueue, commandPool, rgba8, width, height);
+}
+
+int VulkanRenderAPI::CreateMaterialPipeline(const std::string &vertName,
+                                            const std::string &fragName)
+{
+    if (!sceneRenderer)
+        return -1;
+    return sceneRenderer->CreateMaterialPipeline(VULKAN_SHADER_DIR, vertName, fragName);
 }
 
 void VulkanRenderAPI::RenderShadowMap(VkCommandBuffer cmd)

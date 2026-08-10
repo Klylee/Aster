@@ -48,6 +48,7 @@ private:
     std::shared_ptr<Model> model;
     std::shared_ptr<Material> material;      // 棱角球材质
     std::shared_ptr<Material> groundMaterial; // 地面材质（OpenGL IBL uniform 更新用）
+    int toonPipeline = -1;       // M3：自定义 toon 管线索引（地面材质使用）
     float rotationTime = 0.0f;
     bool softShadow = true;      // 软阴影开关（ImGui 按钮切换）
     int shadowDebugView = 0;     // shadowmap 调试视图（0=正常，1=2D，2=点光源 cubemap）

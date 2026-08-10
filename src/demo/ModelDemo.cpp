@@ -197,6 +197,18 @@ bool ModelDemoApp::InitScene()
     groundMaterial->roughness = 1.0f;
     groundMaterial->metallic = 0.0f;
     groundMaterial->ao = 1.0f;
+
+    // M3：创建自定义 toon（卡通）管线并赋给地面材质 → 地面用卡通 shader，球体用默认 PBR mesh shader
+#ifdef ASTER_ENABLE_VULKAN
+    if (renderAPI && renderAPI->IsVulkan())
+    {
+        auto *vk = static_cast<VulkanRenderAPI *>(renderAPI);
+        toonPipeline = vk->CreateMaterialPipeline("toon.vert", "toon.frag");
+        if (toonPipeline > 0)
+            groundMaterial->vulkanPipeline = toonPipeline;
+    }
+#endif
+
     SceneManager::Instance().AddObject(planeModel);
 
     // ---- 棱角球：半径 2，位于地面 (0,2,0)，低细分让棱角与阴影轮廓可见 ----
