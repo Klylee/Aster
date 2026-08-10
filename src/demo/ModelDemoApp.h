@@ -46,7 +46,9 @@ protected:
 private:
     std::shared_ptr<Mesh> mesh;
     std::shared_ptr<Model> model;
-    std::shared_ptr<Material> material;      // 棱角球材质
+    std::shared_ptr<Model> secondModel;       // 第二颗球（材质实例，演示“同 shader 不同参数”）
+    std::shared_ptr<Material> material;      // 棱角球材质（基础材质 "sphere"）
+    std::shared_ptr<Material> material2;     // 第二颗球材质（"sphere" 的实例 "sphere_blue"）
     std::shared_ptr<Material> groundMaterial; // 地面材质（OpenGL IBL uniform 更新用）
     int toonPipeline = -1;       // M3：自定义 toon 管线索引（地面材质使用）
     float rotationTime = 0.0f;

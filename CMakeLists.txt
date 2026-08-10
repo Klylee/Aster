@@ -219,6 +219,8 @@ add_library(aster STATIC
     ${CMAKE_SOURCE_DIR}/src/Aster/Lighting/LightManager.h
     ${CMAKE_SOURCE_DIR}/src/Aster/Resource/Material.cpp
     ${CMAKE_SOURCE_DIR}/src/Aster/Resource/Material.h
+    ${CMAKE_SOURCE_DIR}/src/Aster/Resource/MaterialManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Aster/Resource/MaterialManager.h
     ${CMAKE_SOURCE_DIR}/src/Aster/Resource/Mesh.cpp
     ${CMAKE_SOURCE_DIR}/src/Aster/Resource/Mesh.h
     ${CMAKE_SOURCE_DIR}/src/Aster/Resource/MeshManager.cpp

@@ -279,3 +279,38 @@ EnvironmentMap ──SetEnvironmentMap──▶ 后端上传（Vulkan：staging+
   深度逻辑，强投会出错，故只对默认 mesh 管线录阴影。
 - **纹理索引 0 = 白色占位**：无纹理对象采样 binding 11 数组时命中白色 → 退化为纯色，
   避免“无纹理”与“索引越界”的未定义行为。
+
+---
+
+# 全局材质管理器（MaterialManager，里程碑 11）
+
+让材质**可复用**：多个物体共享同一 shader，或共享同一材质对象；并支持“同一 shader、
+不同参数”的**材质实例**。
+
+## 设计
+
+- `src/Aster/Resource/MaterialManager.h/.cpp`：全局材质管理器（Meyer 单例，与
+  `SceneManager` / `MeshManager` 一致）。
+  1. **Shader 复用**：`RegisterShader(name, path)` 按名缓存 1 份 `shared_ptr<Shader>`，
+     同一路径只编译/持有一次（OpenGL 后端避免每材质重复加载）。
+  2. **基础材质复用**：`RegisterMaterial(name, shaderName, color)` / `RegisterMaterial(name, color)`
+     按名缓存；`GetMaterial(name)` 返回同一实例 → 多个物体引用同一材质对象。
+  3. **材质实例**：`CreateMaterialInstance(instanceName, baseName)` 以基础材质为模板
+     复制创建实例——`shader` 与 base **共享**（同一 shared_ptr），参数（颜色/粗糙度/
+     金属度/AO/纹理/管线/OpenGL uniforms）复制后**独立可改**。这是“物体 A/B 用同一
+     shader、只是颜色/粗糙度不同”的用法。
+- `Material.h`：新增 `name` / `baseName` 元数据（实例记录基础材质名）。
+- `CMakeLists.txt`：加入 `MaterialManager.cpp/h`。
+- demo：`ModelDemo.cpp` 的材质创建全部改走 `MaterialManager`（注册 `ground` / `sphere`
+  基础材质）；新增第二颗球 `sphereB`——`CreateMaterialInstance("sphere_blue", "sphere")`
+  实例：蓝色、粗糙度 0.85、无纹理，复用同一 icosphere 网格；ImGui 面板展示管理器
+  注册表（shader 数 / 材质数 / 每个材质的参数与实例关系）。
+
+## 验证
+- macOS（Vulkan / MoltenVK）实机运行无错误：主球橙色 PBR 棋盘、第二颗球蓝色哑光
+  （同一 shader、不同参数）、地面 toon 卡通；ImGui 显示 `sphere_blue <- sphere`。
+
+## 说明
+- 实例是“快照”：创建后改 base 不影响已创建实例，改实例不影响 base。
+- Vulkan 后端 shader 为 null（程序化材质），复用体现在“同材质对象共享”与“实例参数
+  独立”；OpenGL 后端实例共享 `shared_ptr<Shader>`，避免重复编译。

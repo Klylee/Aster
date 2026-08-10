@@ -40,6 +40,12 @@ public:
     RenderState renderState;
     unsigned int renderQueue = RenderQueue::Geometry;
 
+    // 材质元数据（MaterialManager 使用，调试 / 资源管理）：
+    //   name     注册名（管理器中的唯一标识）
+    //   baseName 若是“材质实例”，记录其基础材质名（共享 shader、参数独立）
+    std::string name;      // 注册名
+    std::string baseName;  // 实例的基础材质名（空 = 基础材质）
+
     // 单色材质颜色：Vulkan 后端使用（对应 mesh.frag 的 push constant color），
     // OpenGL 后端配合 shader 的 _color uniform 使用。
     glm::vec4 color = glm::vec4(1.0f);

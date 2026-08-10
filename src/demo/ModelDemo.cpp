@@ -18,6 +18,7 @@
 #include <env_config.h> // ROOT_DIR（由 CMake configure_file 生成）
 
 #include "Aster/Resource/Shader.h"
+#include "Aster/Resource/MaterialManager.h"
 #include "Aster/Render/Renderer.h"
 #include "Aster/Core/Path.h"
 #include "Aster/Lighting/Light.h"
@@ -148,28 +149,31 @@ bool ModelDemoApp::InitScene()
         cam->transform.Rotate(Vec3(0.0f, 0.0f, -1.0f), dir);
     }
 
-    // 材质工厂：Vulkan 用单色（无 shader），OpenGL 用 env_ibl.shader
-    // （环境贴图 IBL 版；uEnvMode=0 时退化为单色，与旧 transparent.shader 一致）。
-    auto makeMaterial = [&](const glm::vec4 &c) -> std::shared_ptr<Material>
+    // ---- 全局材质管理器（MaterialManager）：Shader / 材质复用 ----
+    // OpenGL 后端注册 env_ibl shader（Vulkan 后端无需 shader）。
+    auto &mm = MaterialManager::Instance();
+    if (renderAPI && renderAPI->IsOpenGL())
+        mm.RegisterShader("env_ibl",
+                          Path(ROOT_DIR) + "assets/shader/opengl/env_ibl.shader");
+
+    // 通过管理器注册“基础材质”（OpenGL 用 env_ibl shader + env 纹理单元；
+    // Vulkan 用无 shader 程序化材质）。同名幂等：重复注册返回缓存实例。
+    auto registerMaterial = [&](const std::string &name,
+                                const glm::vec4 &c) -> std::shared_ptr<Material>
     {
         std::shared_ptr<Material> mat;
         if (renderAPI && renderAPI->IsOpenGL())
+            mat = mm.RegisterMaterial(name, "env_ibl", c);
+        else
+            mat = mm.RegisterMaterial(name, c);
+        if (renderAPI && renderAPI->IsOpenGL())
         {
-            auto shader = std::make_shared<Shader>(std::unordered_map<ShaderVariant, std::string>{
-                {ShaderVariant::Basic, Path(ROOT_DIR) + "assets/shader/env_ibl.shader"}});
-            mat = std::make_shared<Material>(shader);
             // 环境贴图纹理单元（与 OpenGLEnvironment::BindSceneTextures 一致）
             mat->SetUniform("uEnvMap", "int", 6);
             mat->SetUniform("uIrradianceMap", "int", 7);
             mat->SetUniform("uPrefilteredMap", "int", 8);
             mat->SetUniform("uBRDFLUT", "int", 9);
         }
-        else
-        {
-            mat = std::make_shared<Material>();
-        }
-        mat->color = c;
-        mat->SetUniform("color", "vec4f", c); // OpenGL 的 color uniform
         return mat;
     };
 
@@ -191,7 +195,7 @@ bool ModelDemoApp::InitScene()
     planeModel->objName = "ground";
     planeModel->castsShadow = false; // 地面是接收体，不投影阴影
     planeModel->meshes.push_back(planeMesh);
-    planeModel->material = makeMaterial(glm::vec4(0.55f, 0.55f, 0.58f, 1.0f));
+    planeModel->material = registerMaterial("ground", glm::vec4(0.55f, 0.55f, 0.58f, 1.0f));
     groundMaterial = planeModel->material; // 保存引用（OpenGL 每帧更新环境 uniform）
     // M1：地面设为哑光材质（roughness=1 不反射环境），体现每对象材质差异
     groundMaterial->roughness = 1.0f;
@@ -235,7 +239,7 @@ bool ModelDemoApp::InitScene()
     model->objName = "icosphere";
     model->castsShadow = true;
     model->meshes.push_back(mesh);
-    material = makeMaterial(glm::vec4(1.0f, 0.62f, 0.25f, 1.0f));
+    material = registerMaterial("sphere", glm::vec4(1.0f, 0.62f, 0.25f, 1.0f));
     model->material = material;
     // M1：球体材质参数由滑块控制（每对象，与地面哑光材质不同）
     material->roughness = envRoughness;
@@ -270,6 +274,27 @@ bool ModelDemoApp::InitScene()
 
     model->transform.SetPosition(Vec3(0.0f, 2.0f, 0.0f)); // 半径 2 落在地面 y=0
     SceneManager::Instance().AddObject(model);
+
+    // ---- 第二颗球：MaterialManager 材质实例（共享 "sphere" 的 shader，参数独立） ----
+    // 演示“物体 A / B 用同一 shader，只是颜色 / 粗糙度不同”
+    material2 = mm.CreateMaterialInstance("sphere_blue", "sphere");
+    if (material2)
+    {
+        material2->color = glm::vec4(0.30f, 0.55f, 0.95f, 1.0f); // 蓝色
+        material2->roughness = 0.85f;                           // 高粗糙度（哑光）
+        material2->metallic = 0.1f;
+        material2->ao = 1.0f;
+        material2->textureIndex = -1;   // 纯色（不用棋盘纹理）
+        material2->SetUniform("color", "vec4f", material2->color); // OpenGL uniform
+    }
+    secondModel = std::make_shared<Model>();
+    secondModel->objName = "sphereB";
+    secondModel->castsShadow = true;
+    secondModel->meshes.push_back(mesh); // 复用同一 icosphere 网格（Mesh 复用）
+    secondModel->material = material2;
+    secondModel->transform.SetPosition(Vec3(7.0f, 2.0f, 0.0f));
+    secondModel->transform.SetScale(Vec3(0.7f)); // 稍小，与主球区分
+    SceneManager::Instance().AddObject(secondModel);
 
     // ---- 聚光灯：远处照向球（同时作为阴影投影光源） ----
     auto spotLight = std::make_shared<SpotLight>();
@@ -384,14 +409,40 @@ void ModelDemoApp::Update()
     model->transform.SetRotation(
         glm::angleAxis(rotationTime * 0.8f, glm::vec3(0.0f, 1.0f, 0.0f)) *
         glm::angleAxis(rotationTime * 0.4f, glm::vec3(1.0f, 0.0f, 0.0f)));
+    // 第二颗球以不同速度自转（材质实例，行为独立）
+    if (secondModel)
+    {
+        secondModel->transform.SetRotation(
+            glm::angleAxis(rotationTime * -0.5f, glm::vec3(0.0f, 1.0f, 0.0f)) *
+            glm::angleAxis(rotationTime * 0.3f, glm::vec3(1.0f, 0.0f, 0.0f)));
+    }
 }
 
 void ModelDemoApp::RenderImGui()
 {
-    ImGui::ShowDemoWindow();
+    // ImGui::ShowDemoWindow();
     ImGui::Begin("Model Demo");
     ImGui::Text("Active backend: %s", renderAPI->Name());
     ImGui::Text("Vertices: %d, Indices: %d", mesh->v_num, mesh->i_num);
+
+    // ---- 全局材质管理器（MaterialManager）展示 ----
+    auto &mm = MaterialManager::Instance();
+    ImGui::Separator();
+    ImGui::Text("MaterialManager: %zu shaders / %zu materials",
+                mm.ShaderCount(), mm.MaterialCount());
+    for (const auto &kv : mm.GetShaders())
+        ImGui::BulletText("shader: %s", kv.first.c_str());
+    for (const auto &kv : mm.GetMaterials())
+    {
+        const auto &m = kv.second;
+        ImGui::BulletText("material: %s%s  (r=%.2f, m=%.2f, color=(%.2f,%.2f,%.2f))",
+                          kv.first.c_str(),
+                          m->baseName.empty() ? "" : (" <- " + m->baseName).c_str(),
+                          m->roughness, m->metallic, m->color.r, m->color.g, m->color.b);
+    }
+    ImGui::TextWrapped("'sphere_blue' 是 'sphere' 的实例：共享同一 shader，颜色/粗糙度独立。");
+
+    ImGui::Separator();
     ImGui::ColorEdit4("Material color", glm::value_ptr(material->color));
 
     // 软/硬阴影切换
