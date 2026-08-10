@@ -936,8 +936,8 @@ void VulkanRenderAPI::DestroySceneRenderer()
     }
 }
 
-void VulkanRenderAPI::SubmitSceneMesh(const Mesh &mesh, const glm::mat4 &model, const glm::vec4 &color,
-                                      bool castsShadow)
+void VulkanRenderAPI::SubmitSceneMesh(const Mesh &mesh, const glm::mat4 &model,
+                                      const MaterialParams &params, bool castsShadow)
 {
     if (!sceneRenderer)
         return;
@@ -959,7 +959,10 @@ void VulkanRenderAPI::SubmitSceneMesh(const Mesh &mesh, const glm::mat4 &model, 
         const_cast<Mesh &>(mesh).vulkanBuffer = buf;
     }
 
-    sceneRenderer->Submit(*mesh.vulkanBuffer, model, color, castsShadow);
+    // 材质参数 → push constant vec4（粗糙度, 金属度, AO, 纹理索引）
+    glm::vec4 material(params.roughness, params.metallic, params.ao,
+                       (float)params.textureIndex);
+    sceneRenderer->Submit(*mesh.vulkanBuffer, model, params.color, material, castsShadow);
     hasSceneMesh = true;
 }
 
@@ -1007,6 +1010,13 @@ void VulkanRenderAPI::SetEnvParams(float intensity, float roughness, float metal
         sceneRenderer->SetEnvParams(intensity, roughness, metallic, ao, yaw, exposure, toneMap);
 }
 
+int VulkanRenderAPI::RegisterMaterialTexture(const uint8_t *rgba8, int width, int height)
+{
+    if (!sceneRenderer || !graphicsQueue || !commandPool)
+        return -1;
+    return sceneRenderer->RegisterMaterialTexture(graphicsQueue, commandPool, rgba8, width, height);
+}
+
 void VulkanRenderAPI::RenderShadowMap(VkCommandBuffer cmd)
 {
     if (sceneRenderer)
@@ -1041,7 +1051,8 @@ void VulkanRenderAPI::RenderScene(VkCommandBuffer cmd)
     {
         glm::mat4 model = glm::rotate(glm::mat4(1.0f), time * 0.8f, glm::vec3(0.0f, 1.0f, 0.0f)) *
                           glm::rotate(glm::mat4(1.0f), time * 0.4f, glm::vec3(1.0f, 0.0f, 0.0f));
-        sceneRenderer->Submit(*cubeMesh, model, glm::vec4(1.0f, 0.62f, 0.25f, 1.0f));
+        sceneRenderer->Submit(*cubeMesh, model, glm::vec4(1.0f, 0.62f, 0.25f, 1.0f),
+                              glm::vec4(0.35f, 0.0f, 1.0f, -1.0f));
     }
 
     // 本帧场景绘制结束，重置标记（下一帧由 Clear() 重新 BeginFrame）

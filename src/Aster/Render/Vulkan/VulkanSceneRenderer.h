@@ -46,11 +46,19 @@ public:
     void Shutdown();
 
     void BeginFrame();
+    // material = (粗糙度, 金属度, AO, 纹理索引)；-1 纹理 = 无纹理
+    // pipelineIndex：0 = 默认 mesh 管线；>=1 = CreateMaterialPipeline 返回的自定义管线
     void Submit(const VulkanMeshBuffer &mesh, const glm::mat4 &model, const glm::vec4 &color,
-                bool castsShadow = true);
+                const glm::vec4 &material, bool castsShadow = true, int pipelineIndex = 0);
     // 录制阴影映射 pass（必须在主 render pass 开始前调用，Present 中先于主 pass）
     void RecordShadow(VkCommandBuffer cmd);
     void Record(VkCommandBuffer cmd, const glm::mat4 &view, const glm::mat4 &proj);
+
+    // ---- M3：自定义材质管线 ----
+    // 创建自定义顶点/片元管线（共享描述集布局/顶点布局/push constants），返回索引（1 起）。
+    // shaderDir = spv 目录；vertName/fragName 如 "toon.vert"/"toon.frag"。
+    int CreateMaterialPipeline(const std::string &shaderDir,
+                               const std::string &vertName, const std::string &fragName);
 
     // 设置本帧灯光数据（App 每帧调用；Record 时上传到灯光 UBO）
     void SetLights(const LightUBO &lights);
@@ -64,6 +72,11 @@ public:
 
     // shadowmap 调试视图：0=正常，1=显示 2D shadow map 深度，2=显示点光源 cubemap 深度
     void SetShadowDebugView(int mode) { shadowDebugView_ = mode; }
+
+    // ---- M2：每对象材质纹理 ----
+    // 注册一张 RGBA8 纹理到 binding 11 数组，返回索引（-1 失败）；索引 0 = 白色。
+    int RegisterMaterialTexture(VkQueue queue, VkCommandPool cmdPool,
+                                const uint8_t *rgba8, int width, int height);
 
     // ---- 环境贴图（IBL） ----
     // 上传环境贴图（cubemap / irradiance / 预过滤 / BRDF LUT）到管线。
@@ -98,7 +111,9 @@ private:
         const VulkanMeshBuffer *mesh = nullptr;
         glm::mat4 model;
         glm::vec4 color;
+        glm::vec4 material;   // (粗糙度, 金属度, AO, 纹理索引)
         bool castsShadow = true;
+        int pipelineIndex = 0; // 0=默认 mesh 管线，>=1=自定义管线
     };
 
     VkDevice device = VK_NULL_HANDLE;

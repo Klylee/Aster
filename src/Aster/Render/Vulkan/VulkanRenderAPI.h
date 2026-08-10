@@ -47,8 +47,9 @@ public:
     // ---- 场景渲染（Model / 框架 Mesh 经此提交到 Vulkan） ----
     // 提交一个框架 Mesh（顶点布局 pos3+nor3+uv2）绘制。
     // 首次提交时会懒创建 Mesh 的 VulkanMeshBuffer；本帧在 Present() 中渲染。
+    // params：每对象材质参数（颜色 / 粗糙度 / 金属度 / AO / 纹理索引 / 管线）。
     // castsShadow：该网格是否投影平面阴影（接收体如地面应传 false）。
-    void SubmitSceneMesh(const Mesh &mesh, const glm::mat4 &model, const glm::vec4 &color,
+    void SubmitSceneMesh(const Mesh &mesh, const glm::mat4 &model, const MaterialParams &params,
                          bool castsShadow = true);
 
     // 设置场景相机；RenderScene 使用它而非演示用的环绕相机。
@@ -71,6 +72,10 @@ public:
     // 环境参数：强度/粗糙度/金属度/AO/方位角/曝光/tone map
     void SetEnvParams(float intensity, float roughness, float metallic,
                       float ao, float yaw, float exposure, bool toneMap) override;
+
+    // ---- M2：每对象材质纹理 ----
+    // 注册一张 RGBA8 材质纹理（转发到场景渲染器 binding 11），返回索引（-1 失败）。
+    int RegisterMaterialTexture(const uint8_t *rgba8, int width, int height);
 
     RenderAPIType Type() const override { return RenderAPIType::Vulkan; }
     const char *Name() const override { return "Vulkan"; }

@@ -135,10 +135,20 @@ void Model::draw()
     if (api && api->IsVulkan())
     {
         auto *vk = static_cast<VulkanRenderAPI *>(api);
-        glm::vec4 color = material ? material->color : glm::vec4(1.0f);
+        // 每对象材质参数（颜色 / 粗糙度 / 金属度 / AO / 纹理索引 / 管线）
+        MaterialParams mp;
+        if (material)
+        {
+            mp.color = material->color;
+            mp.roughness = material->roughness;
+            mp.metallic = material->metallic;
+            mp.ao = material->ao;
+            mp.textureIndex = material->textureIndex;
+            mp.pipelineIndex = material->vulkanPipeline; // M3：自定义 shader 管线
+        }
         glm::mat4 modelMat = transform.GetLocalToWorld();
         for (const auto &mesh : meshes)
-            vk->SubmitSceneMesh(*mesh, modelMat, color, castsShadow);
+            vk->SubmitSceneMesh(*mesh, modelMat, mp, castsShadow);
         return;
     }
 #endif

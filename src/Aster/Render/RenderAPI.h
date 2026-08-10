@@ -23,6 +23,25 @@
 #include "LightData.h"      // LightUBO：灯光数据（无 GL 依赖）
 #include "EnvironmentMap.h" // 环境贴图资源（无 GL/Vulkan 依赖）
 
+// ============================================================================
+// 每对象材质参数（Vulkan 场景渲染用）
+//   color         —— 基础色 / 反照率（push constant）
+//   roughness     —— 粗糙度（高光 IBL / 高光分布）
+//   metallic      —— 金属度
+//   ao            —— 环境光遮蔽
+//   textureIndex  —— M2：材质纹理索引（-1 = 无纹理）
+//   pipelineIndex —— M3：自定义 shader 管线索引（0 = 默认 mesh 管线）
+// ============================================================================
+struct MaterialParams
+{
+    glm::vec4 color = glm::vec4(1.0f);
+    float roughness = 0.35f;
+    float metallic = 0.0f;
+    float ao = 1.0f;
+    int textureIndex = -1;
+    int pipelineIndex = 0;
+};
+
 // 前向声明，避免把 GLFW 头文件带到所有包含方
 struct GLFWwindow;
 

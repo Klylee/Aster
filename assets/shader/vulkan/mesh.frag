@@ -9,6 +9,7 @@ layout(push_constant) uniform PushConstants {
     mat4 model;
     vec4 color;
     vec4 shadow;
+    vec4 material; // x=粗糙度, y=金属度, z=AO, w=纹理索引(M2)
 } pc;
 
 layout(location = 0) in vec3 vNormal;
@@ -91,6 +92,11 @@ layout(std140, set = 0, binding = 10) uniform EnvUBO {
     vec4 params1; // x=粗糙度, y=金属度, z=方位角(弧度), w=曝光
     vec4 params2; // x=tonemap(0/1), yzw=相机位置
 } uEnv;
+
+// M2：每对象材质纹理数组（索引来自 pc.material.w，-1=无纹理）。
+// 索引 0 为 1x1 白色纹理（无纹理时采样它 = 纯色）。
+const int MAX_MATERIAL_TEXTURES = 16;
+layout(set = 0, binding = 11) uniform sampler2D uMaterialTextures[MAX_MATERIAL_TEXTURES];
 
 layout(location = 0) out vec4 FragColor;
 
@@ -261,9 +267,10 @@ vec3 ComputeEnvAmbient(vec3 N, vec3 V, vec3 albedo)
 {
     int envMode = int(uEnv.params0.y);
     float yaw = uEnv.params1.z;
-    float roughness = clamp(uEnv.params1.x, 0.0, 1.0);
-    float metallic = clamp(uEnv.params1.y, 0.0, 1.0);
-    float ao = uEnv.params0.w;
+    // 每对象材质参数（M1）：粗糙度/金属度/AO 来自 push constant 而非全局 EnvUBO
+    float roughness = clamp(pc.material.x, 0.0, 1.0);
+    float metallic = clamp(pc.material.y, 0.0, 1.0);
+    float ao = pc.material.z;
     float NdotV = max(dot(N, V), 0.0);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
@@ -367,6 +374,12 @@ void main()
         return;
     }
 
+    // ---- 每对象材质纹理（M2）：textureIndex>=0 采样纹理 × tint，否则纯色 ----
+    vec3 albedo = pc.color.rgb;
+    int texIdx = int(pc.material.w);
+    if (texIdx >= 0 && texIdx < MAX_MATERIAL_TEXTURES)
+        albedo = texture(uMaterialTextures[texIdx], vUV).rgb * albedo;
+
     vec3 lit = vec3(0.0);
     int count = clamp(uLights.lightCount, 0, 32);
     for (int i = 0; i < count; i++)
@@ -389,15 +402,15 @@ void main()
     if (envMode == 0)
     {
         // 关闭环境贴图：保持原来的固定环境光
-        final = pc.color.rgb * 0.12 + pc.color.rgb * lit;
+        final = albedo * 0.12 + albedo * lit;
     }
     else
     {
         // 环境 IBL 作为环境项，与直接光叠加
         vec3 camPos = uEnv.params2.yzw;
         vec3 V = normalize(camPos - vWorldPos);
-        vec3 ambient = ComputeEnvAmbient(N, V, pc.color.rgb);
-        final = ambient * uEnv.params0.x + pc.color.rgb * lit;
+        vec3 ambient = ComputeEnvAmbient(N, V, albedo);
+        final = ambient * uEnv.params0.x + albedo * lit;
     }
 
     FragColor = vec4(ToneMapColor(final), pc.color.a);

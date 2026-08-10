@@ -23,6 +23,9 @@
 #include "Aster/Lighting/Light.h"
 #include "Aster/Core/GlobalTime.h"
 #include "Aster/Scene/SceneManager.h"
+#ifdef ASTER_ENABLE_VULKAN
+#include "Aster/Render/Vulkan/VulkanRenderAPI.h"
+#endif
 
 using namespace aster;
 
@@ -176,12 +179,24 @@ bool ModelDemoApp::InitScene()
     BuildPlane(100.0f, pPos, pNor, pIdx);
     auto planeMesh = std::make_shared<Mesh>(pPos, pIdx, pNor);
     planeMesh->initialize();
+    // M2：平面 UV（0..1 覆盖整张地面，供材质纹理采样）
+    for (int i = 0; i < planeMesh->v_num; i++)
+    {
+        float x = planeMesh->vertices[i * 8 + 0];
+        float z = planeMesh->vertices[i * 8 + 2];
+        planeMesh->vertices[i * 8 + 6] = x * 0.02f + 0.5f;
+        planeMesh->vertices[i * 8 + 7] = z * 0.02f + 0.5f;
+    }
     auto planeModel = std::make_shared<Model>();
     planeModel->objName = "ground";
     planeModel->castsShadow = false; // 地面是接收体，不投影阴影
     planeModel->meshes.push_back(planeMesh);
     planeModel->material = makeMaterial(glm::vec4(0.55f, 0.55f, 0.58f, 1.0f));
     groundMaterial = planeModel->material; // 保存引用（OpenGL 每帧更新环境 uniform）
+    // M1：地面设为哑光材质（roughness=1 不反射环境），体现每对象材质差异
+    groundMaterial->roughness = 1.0f;
+    groundMaterial->metallic = 0.0f;
+    groundMaterial->ao = 1.0f;
     SceneManager::Instance().AddObject(planeModel);
 
     // ---- 棱角球：半径 2，位于地面 (0,2,0)，低细分让棱角与阴影轮廓可见 ----
@@ -192,12 +207,55 @@ bool ModelDemoApp::InitScene()
     mesh = std::make_shared<Mesh>(positions, indices, normals);
     mesh->initialize(); // Vulkan 后端下内部跳过 OpenGL 缓冲创建
 
+    // M2：icosphere 球面 UV（等距柱状投影，供材质纹理采样）
+    {
+        const double kPi = 3.14159265358979323846;
+        for (int i = 0; i < mesh->v_num; i++)
+        {
+            glm::vec3 d(positions[i * 3 + 0], positions[i * 3 + 1], positions[i * 3 + 2]);
+            d = glm::normalize(d);
+            mesh->vertices[i * 8 + 6] = (float)(0.5 + std::atan2(d.z, d.x) / (2.0 * kPi));
+            mesh->vertices[i * 8 + 7] = (float)(0.5 - std::asin(d.y) / kPi);
+        }
+    }
+
     model = std::make_shared<Model>();
     model->objName = "icosphere";
     model->castsShadow = true;
     model->meshes.push_back(mesh);
     material = makeMaterial(glm::vec4(1.0f, 0.62f, 0.25f, 1.0f));
     model->material = material;
+    // M1：球体材质参数由滑块控制（每对象，与地面哑光材质不同）
+    material->roughness = envRoughness;
+    material->metallic = envMetallic;
+    material->ao = envAO;
+
+    // M2：棋盘材质纹理（RGBA8 256x256）——球体使用纹理，地面保持纯色
+#ifdef ASTER_ENABLE_VULKAN
+    if (renderAPI && renderAPI->IsVulkan())
+    {
+        const int TEX = 256;
+        std::vector<uint8_t> checker((size_t)TEX * TEX * 4);
+        for (int y = 0; y < TEX; y++)
+        {
+            for (int x = 0; x < TEX; x++)
+            {
+                bool light = ((x / 32) + (y / 32)) % 2 == 0;
+                uint8_t c = light ? 230 : 40;
+                size_t p = ((size_t)y * TEX + x) * 4;
+                checker[p + 0] = c;
+                checker[p + 1] = c;
+                checker[p + 2] = c;
+                checker[p + 3] = 255;
+            }
+        }
+        auto *vk = static_cast<VulkanRenderAPI *>(renderAPI);
+        int texIdx = vk->RegisterMaterialTexture(checker.data(), TEX, TEX);
+        if (texIdx >= 0)
+            material->textureIndex = texIdx; // 球体使用棋盘纹理
+    }
+#endif
+
     model->transform.SetPosition(Vec3(0.0f, 2.0f, 0.0f)); // 半径 2 落在地面 y=0
     SceneManager::Instance().AddObject(model);
 
@@ -277,6 +335,14 @@ void ModelDemoApp::Update()
             renderAPI->SetEnvParams(envIntensity, envRoughness, envMetallic, envAO,
                                     glm::radians(envYawDeg), envExposure, envToneMap);
 
+            // M1：每对象材质参数 —— 滑块控制球体材质（地面保持哑光 roughness=1）
+            if (material)
+            {
+                material->roughness = envRoughness;
+                material->metallic = envMetallic;
+                material->ao = envAO;
+            }
+
             // OpenGL 后端：环境参数经材质 uniform 传给场景着色器（env_ibl.shader）
             if (renderAPI->IsOpenGL())
             {
@@ -355,9 +421,11 @@ void ModelDemoApp::RenderImGui()
         if (renderAPI)
             renderAPI->SetEnvMode(envMode);
     ImGui::SliderFloat("Env Intensity", &envIntensity, 0.0f, 5.0f, "%.2f");
-    ImGui::SliderFloat("Roughness", &envRoughness, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Metallic", &envMetallic, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("AO", &envAO, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Sphere Roughness", &envRoughness, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Sphere Metallic", &envMetallic, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Sphere AO", &envAO, 0.0f, 1.0f, "%.2f");
+    ImGui::TextWrapped("Per-object material (M1): ground is matte (roughness=1), "
+                       "sphere uses these sliders.");
     ImGui::SliderFloat("Env Yaw", &envYawDeg, -180.0f, 180.0f, "%.0f deg");
     ImGui::SliderFloat("Exposure", &envExposure, 0.1f, 5.0f, "%.2f");
     ImGui::Checkbox("Tone map (Reinhard)", &envToneMap);

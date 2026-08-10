@@ -91,7 +91,8 @@ bool VulkanPipeline::Create(VkDevice device, VkPhysicalDevice physicalDevice,
     //   binding 8  = 高光预过滤 cubemap（片元阶段）
     //   binding 9  = BRDF LUT（片元阶段）
     //   binding 10 = 环境 UBO（强度/模式/材质/相机，片元阶段）
-    VkDescriptorSetLayoutBinding layoutBindings[11]{};
+    //   binding 11 = 每对象材质纹理数组（M2，片元阶段）
+    VkDescriptorSetLayoutBinding layoutBindings[12]{};
     layoutBindings[0].binding = 0;
     layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     layoutBindings[0].descriptorCount = 1;
@@ -136,10 +137,14 @@ bool VulkanPipeline::Create(VkDevice device, VkPhysicalDevice physicalDevice,
     layoutBindings[10].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     layoutBindings[10].descriptorCount = 1;
     layoutBindings[10].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    layoutBindings[11].binding = 11;
+    layoutBindings[11].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    layoutBindings[11].descriptorCount = MAX_MATERIAL_TEXTURES;
+    layoutBindings[11].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutCreateInfo setLayoutInfo{};
     setLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    setLayoutInfo.bindingCount = 11;
+    setLayoutInfo.bindingCount = 12;
     setLayoutInfo.pBindings = layoutBindings;
     if (vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS)
     {
@@ -208,13 +213,13 @@ bool VulkanPipeline::Create(VkDevice device, VkPhysicalDevice physicalDevice,
 
     // ---- 描述符池 + 描述符集 ----
     // 每个描述符集含 5 个 UBO（相机/灯光/阴影/点阴影/环境）与 6 个 CIS（2D 阴影数组 +
-    // 点阴影 cubemap + 环境 cubemap + irradiance + 预过滤 + BRDF LUT）；
+    // 点阴影 cubemap + 环境 cubemap + irradiance + 预过滤 + BRDF LUT）+ 材质纹理数组；
     // 主集 + 阴影集共 2 套。容量按 2 套计，保证分配不超。
     VkDescriptorPoolSize poolSizes[2]{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = 5 * 2; // 主集 + 阴影集各 5 个 UBO
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = (MAX_2D_SHADOW_MAPS + 1 + 4) * 2; // 2D shadow maps + 点阴影 + 4 个环境贴图，主/阴影各一份
+    poolSizes[1].descriptorCount = (MAX_2D_SHADOW_MAPS + 1 + 4 + MAX_MATERIAL_TEXTURES) * 2; // 主/阴影各一份
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -621,6 +626,11 @@ void VulkanPipeline::Destroy()
         vkDestroyPipeline(device, skyboxPipeline, nullptr);
         skyboxPipeline = VK_NULL_HANDLE;
     }
+    // M3：自定义材质管线
+    for (VkPipeline p : materialPipelines)
+        if (p)
+            vkDestroyPipeline(device, p, nullptr);
+    materialPipelines.clear();
     if (envSampler)
     {
         vkDestroySampler(device, envSampler, nullptr);
@@ -636,6 +646,24 @@ void VulkanPipeline::Destroy()
         vkDestroySampler(device, brdfSampler, nullptr);
         brdfSampler = VK_NULL_HANDLE;
     }
+    // 每对象材质纹理（M2）
+    if (materialSampler)
+    {
+        vkDestroySampler(device, materialSampler, nullptr);
+        materialSampler = VK_NULL_HANDLE;
+    }
+    for (VkImageView v : materialImageViews)
+        if (v)
+            vkDestroyImageView(device, v, nullptr);
+    materialImageViews.clear();
+    for (VkDeviceMemory m : materialImageMemories)
+        if (m)
+            vkFreeMemory(device, m, nullptr);
+    materialImageMemories.clear();
+    for (VkImage i : materialImages)
+        if (i)
+            vkDestroyImage(device, i, nullptr);
+    materialImages.clear();
     // 占位资源
     if (dummyCubeView)
     {
@@ -1773,6 +1801,110 @@ bool UploadImage2D(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue que
     vkDestroyBuffer(device, stage, nullptr);
     return ok;
 }
+
+// M2：创建 RGBA8 2D 图像（device-local）并把 CPU 数据 staging 上传（→ SHADER_READ_ONLY）
+bool CreateAndUploadMaterialTexture(VkDevice device, VkPhysicalDevice physicalDevice,
+                                    VkQueue queue, VkCommandPool pool,
+                                    const uint8_t *rgba8, int w, int h,
+                                    VkImage &image, VkDeviceMemory &mem)
+{
+    VkImageCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    info.extent = {(uint32_t)w, (uint32_t)h, 1};
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(device, &info, nullptr, &image) != VK_SUCCESS)
+        return false;
+
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(device, image, &mr);
+    uint32_t mt = FindMemoryType(physicalDevice, mr.memoryTypeBits,
+                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (mt == std::numeric_limits<uint32_t>::max())
+    {
+        vkDestroyImage(device, image, nullptr);
+        image = VK_NULL_HANDLE;
+        return false;
+    }
+    VkMemoryAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    ai.allocationSize = mr.size;
+    ai.memoryTypeIndex = mt;
+    if (vkAllocateMemory(device, &ai, nullptr, &mem) != VK_SUCCESS ||
+        vkBindImageMemory(device, image, mem, 0) != VK_SUCCESS)
+    {
+        if (mem)
+            vkFreeMemory(device, mem, nullptr);
+        vkDestroyImage(device, image, nullptr);
+        image = VK_NULL_HANDLE;
+        mem = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkDeviceSize total = (VkDeviceSize)w * h * 4;
+    VkBuffer stage = VK_NULL_HANDLE;
+    VkDeviceMemory stageMem = VK_NULL_HANDLE;
+    void *mapped = nullptr;
+    if (!CreateStaging(device, physicalDevice, total, stage, stageMem, mapped))
+        return false;
+    std::memcpy(mapped, rgba8, (size_t)total);
+
+    bool ok = SubmitOneTime(device, queue, pool, [&](VkCommandBuffer cmd) {
+        VkImageMemoryBarrier toDst{};
+        toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDst.image = image;
+        toDst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toDst.subresourceRange.levelCount = 1;
+        toDst.subresourceRange.layerCount = 1;
+        toDst.srcAccessMask = 0;
+        toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &toDst);
+
+        VkBufferImageCopy region{};
+        region.bufferOffset = 0;
+        region.bufferRowLength = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageOffset = {0, 0, 0};
+        region.imageExtent = {(uint32_t)w, (uint32_t)h, 1};
+        vkCmdCopyBufferToImage(cmd, stage, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               1, &region);
+
+        VkImageMemoryBarrier toRead{};
+        toRead.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        toRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toRead.image = image;
+        toRead.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toRead.subresourceRange.levelCount = 1;
+        toRead.subresourceRange.layerCount = 1;
+        toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &toRead);
+    });
+
+    vkUnmapMemory(device, stageMem);
+    vkFreeMemory(device, stageMem, nullptr);
+    vkDestroyBuffer(device, stage, nullptr);
+    return ok;
+}
 } // namespace
 
 bool VulkanPipeline::CreateEnvironmentResources(VkQueue queue, VkCommandPool cmdPool,
@@ -2014,7 +2146,276 @@ bool VulkanPipeline::CreateEnvironmentResources(VkQueue queue, VkCommandPool cmd
         vkDestroyShaderModule(device, fragMod, nullptr);
     }
 
+    // ---- M2：材质纹理采样器 + 索引 0 白色占位纹理 + binding 11 全数组初始写入 ----
+    if (!materialSampler)
+    {
+        VkSamplerCreateInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        si.magFilter = VK_FILTER_LINEAR;
+        si.minFilter = VK_FILTER_LINEAR;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        si.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        si.maxLod = 1.0f;
+        if (vkCreateSampler(device, &si, nullptr, &materialSampler) != VK_SUCCESS)
+        {
+            std::cerr << "[VulkanPipeline] Failed to create material sampler" << std::endl;
+            return false;
+        }
+    }
+    if (materialImages.empty())
+    {
+        uint8_t white[4] = {255, 255, 255, 255};
+        VkImage img = VK_NULL_HANDLE;
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        if (!CreateAndUploadMaterialTexture(device, physicalDevice, queue, cmdPool,
+                                            white, 1, 1, img, mem))
+        {
+            std::cerr << "[VulkanPipeline] Failed to create white material texture" << std::endl;
+            return false;
+        }
+        VkImageViewCreateInfo vi{};
+        vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vi.image = img;
+        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vi.format = VK_FORMAT_R8G8B8A8_UNORM;
+        vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vi.subresourceRange.levelCount = 1;
+        vi.subresourceRange.layerCount = 1;
+        VkImageView view = VK_NULL_HANDLE;
+        if (vkCreateImageView(device, &vi, nullptr, &view) != VK_SUCCESS)
+        {
+            vkFreeMemory(device, mem, nullptr);
+            vkDestroyImage(device, img, nullptr);
+            std::cerr << "[VulkanPipeline] Failed to create white texture view" << std::endl;
+            return false;
+        }
+        materialImages.push_back(img);
+        materialImageMemories.push_back(mem);
+        materialImageViews.push_back(view);
+    }
+    { // binding 11 全数组初始指向白色纹理（索引 0）
+        std::vector<VkDescriptorImageInfo> infos(MAX_MATERIAL_TEXTURES);
+        for (int i = 0; i < MAX_MATERIAL_TEXTURES; i++)
+        {
+            infos[i].sampler = materialSampler;
+            infos[i].imageView = materialImageViews[0];
+            infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        VkDescriptorSet sets[2] = {descriptorSet, shadowDescriptorSet};
+        for (VkDescriptorSet set : sets)
+        {
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = set;
+            write.dstBinding = 11;
+            write.dstArrayElement = 0;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.descriptorCount = MAX_MATERIAL_TEXTURES;
+            write.pImageInfo = infos.data();
+            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        }
+        std::cout << "[VulkanPipeline] Material texture array ready ("
+                  << MAX_MATERIAL_TEXTURES << " slots, idx0 = white)" << std::endl;
+    }
+
     return true;
+}
+
+int VulkanPipeline::RegisterMaterialTexture(VkQueue queue, VkCommandPool cmdPool,
+                                            const uint8_t *rgba8, int width, int height)
+{
+    if (!device || !rgba8 || width <= 0 || height <= 0)
+        return -1;
+    if ((int)materialImageViews.size() >= MAX_MATERIAL_TEXTURES)
+    {
+        std::cerr << "[VulkanPipeline] Material texture array full ("
+                  << MAX_MATERIAL_TEXTURES << ")" << std::endl;
+        return -1;
+    }
+
+    VkImage img = VK_NULL_HANDLE;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    if (!CreateAndUploadMaterialTexture(device, physicalDevice, queue, cmdPool,
+                                        rgba8, width, height, img, mem))
+    {
+        std::cerr << "[VulkanPipeline] Failed to upload material texture" << std::endl;
+        return -1;
+    }
+    VkImageViewCreateInfo vi{};
+    vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vi.image = img;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = VK_FORMAT_R8G8B8A8_UNORM;
+    vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vi.subresourceRange.levelCount = 1;
+    vi.subresourceRange.layerCount = 1;
+    VkImageView view = VK_NULL_HANDLE;
+    if (vkCreateImageView(device, &vi, nullptr, &view) != VK_SUCCESS)
+    {
+        vkFreeMemory(device, mem, nullptr);
+        vkDestroyImage(device, img, nullptr);
+        std::cerr << "[VulkanPipeline] Failed to create material texture view" << std::endl;
+        return -1;
+    }
+
+    int index = (int)materialImageViews.size();
+    materialImages.push_back(img);
+    materialImageMemories.push_back(mem);
+    materialImageViews.push_back(view);
+
+    // 更新 binding 11 数组元素（主集 + 阴影集）
+    VkDescriptorImageInfo info{};
+    info.sampler = materialSampler;
+    info.imageView = view;
+    info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorSet sets[2] = {descriptorSet, shadowDescriptorSet};
+    for (VkDescriptorSet set : sets)
+    {
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = set;
+        write.dstBinding = 11;
+        write.dstArrayElement = (uint32_t)index;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.descriptorCount = 1;
+        write.pImageInfo = &info;
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    }
+    std::cout << "[VulkanPipeline] Material texture registered: idx=" << index
+              << " (" << width << "x" << height << ")" << std::endl;
+    return index;
+}
+
+int VulkanPipeline::CreateMaterialPipeline(const std::string &shaderDir,
+                                           const std::string &vertName,
+                                           const std::string &fragName)
+{
+    if (!device)
+        return -1;
+
+    auto withExt = [](std::string n) -> std::string
+    {
+        if (n.size() < 4 || n.compare(n.size() - 4, 4, ".spv") != 0)
+            n += ".spv";
+        return n;
+    };
+    std::string vName = withExt(vertName);
+    std::string fName = withExt(fragName);
+    std::vector<char> vertCode = ReadFile(shaderDir + "/" + vName);
+    std::vector<char> fragCode = ReadFile(shaderDir + "/" + fName);
+    if (vertCode.empty() || fragCode.empty())
+    {
+        std::cerr << "[VulkanPipeline] Material shaders missing: "
+                  << vName << " / " << fName << std::endl;
+        return -1;
+    }
+    VkShaderModule vertMod = CreateShaderModule(device, vertCode);
+    VkShaderModule fragMod = CreateShaderModule(device, fragCode);
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vertMod;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fragMod;
+    stages[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{};
+    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInput.vertexBindingDescriptionCount = (uint32_t)vertexBindings_.size();
+    vertexInput.pVertexBindingDescriptions = vertexBindings_.data();
+    vertexInput.vertexAttributeDescriptionCount = (uint32_t)vertexAttrs_.size();
+    vertexInput.pVertexAttributeDescriptions = vertexAttrs_.data();
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_NONE; // 与主管线一致（双面渲染）
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.depthBiasEnable = VK_FALSE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.sampleShadingEnable = VK_FALSE;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE;
+
+    VkPipelineColorBlendAttachmentState blendAttachment{};
+    blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                     VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    blendAttachment.blendEnable = VK_FALSE;
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.logicOpEnable = VK_FALSE;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &blendAttachment;
+
+    VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = 2;
+    dynamicState.pDynamicStates = dynamicStates;
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = stages;
+    pipelineInfo.pVertexInputState = &vertexInput;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = layout;      // 共享描述集布局 + push constants
+    pipelineInfo.renderPass = renderPass_;
+    pipelineInfo.subpass = 0;
+
+    VkPipeline p = VK_NULL_HANDLE;
+    VkResult r = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &p);
+    vkDestroyShaderModule(device, vertMod, nullptr);
+    vkDestroyShaderModule(device, fragMod, nullptr);
+    if (r != VK_SUCCESS || p == VK_NULL_HANDLE)
+    {
+        std::cerr << "[VulkanPipeline] Failed to create material pipeline" << std::endl;
+        return -1;
+    }
+    materialPipelines.push_back(p);
+    int index = (int)materialPipelines.size(); // 0 = 默认 mesh，自定义从 1 起
+    std::cout << "[VulkanPipeline] Material pipeline created: idx=" << index
+              << " (" << vName << ", " << fName << ")" << std::endl;
+    return index;
+}
+
+VkPipeline VulkanPipeline::GetMaterialPipeline(int index) const
+{
+    if (index <= 0 || index > (int)materialPipelines.size())
+        return VK_NULL_HANDLE;
+    return materialPipelines[index - 1];
 }
 
 bool VulkanPipeline::UploadEnvironmentMap(VkQueue queue, VkCommandPool cmdPool,

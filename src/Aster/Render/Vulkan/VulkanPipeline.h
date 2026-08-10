@@ -77,6 +77,18 @@ public:
     // 阴影深度 pass 使用的描述符集（binding 0 = 阴影专用相机 UBO，其余与主描述符集相同）
     VkDescriptorSet GetShadowDescriptorSet() const { return shadowDescriptorSet; }
 
+    // ---- M3：自定义材质管线 ----
+    // 创建一条与主管线共享描述集布局 / push constants / 顶点布局（pos3+nor3+uv2）的
+    // 自定义材质管线（顶点+片元 SPIR-V）。返回索引：0 = 默认 mesh 管线，自定义从 1 起。
+    // shaderDir = 存放 spv 的目录；vertName/fragName 如 "toon.vert"/"toon.frag"。
+    // 所有管线共用同一描述符集（相机/灯光/环境/材质纹理），自定义管线可访问全部绑定。
+    int CreateMaterialPipeline(const std::string &shaderDir,
+                               const std::string &vertName, const std::string &fragName);
+    // 取自定义材质管线（index 从 1 起；0 或非法返回 VK_NULL_HANDLE）
+    VkPipeline GetMaterialPipeline(int index) const;
+    // 已创建自定义管线数量
+    int GetMaterialPipelineCount() const { return (int)materialPipelines.size(); }
+
     // ---- 阴影映射（多光源：方向光/聚光灯用 2D shadow map，点光源用 cubemap） ----
     static constexpr int MAX_2D_SHADOW_MAPS = 4;  // 方向光 + 聚光灯（2D shadow map 数）
     static constexpr int MAX_POINT_SHADOWS = 1;   // 点光源（cubemap shadow map 数）
@@ -173,6 +185,19 @@ public:
 
     // 预过滤 cubemap 的 mip 级数（EnvUBO 的 mipCount 用）
     int GetPrefilteredMips() const { return prefilteredMips_; }
+
+    // ---- M2：每对象材质纹理（binding 11 数组） ----
+    // 数组容量（与 mesh.frag 的 uMaterialTextures[16] 保持一致）
+    static constexpr int MAX_MATERIAL_TEXTURES = 16;
+
+    // 注册一张 RGBA8 材质纹理（staging 上传到 device-local 并更新 binding 11 元素）。
+    // 返回纹理索引（供 Material::textureIndex 使用），失败返回 -1。
+    // 索引 0 恒为 1x1 白色纹理（无纹理对象采样它 = 纯色）。
+    int RegisterMaterialTexture(VkQueue queue, VkCommandPool cmdPool,
+                                const uint8_t *rgba8, int width, int height);
+
+    // 已注册材质纹理数量（含索引 0 的白色占位）
+    int GetMaterialTextureCount() const { return (int)materialImageViews.size(); }
 
     // 天空盒：在主 render pass 内、绘制场景之前调用（深度写关闭，深度 = 1.0 远平面）。
     // invViewProj 由调用方用“仅旋转的 view”计算（天空盒位于无穷远）。
@@ -282,12 +307,21 @@ private:
     // 天空盒管线（全屏三角形，push constant = mat4 invViewProj + vec4）
     VkPipeline skyboxPipeline = VK_NULL_HANDLE;
 
+    // M3：自定义材质管线（索引 0 = 默认 mesh 管线，不在此列表；自定义从 materialPipelines[0] 起）
+    std::vector<VkPipeline> materialPipelines;
+
     // 阴影管线复用的顶点输入（Create 时保存）
     std::vector<VkVertexInputBindingDescription> vertexBindings_;
     std::vector<VkVertexInputAttributeDescription> vertexAttrs_;
 
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+
+    // ---- M2：每对象材质纹理（binding 11，RGBA8） ----
+    VkSampler materialSampler = VK_NULL_HANDLE;
+    std::vector<VkImage> materialImages;
+    std::vector<VkDeviceMemory> materialImageMemories;
+    std::vector<VkImageView> materialImageViews;
 };
 
 } // namespace aster

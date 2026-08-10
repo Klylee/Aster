@@ -14,12 +14,14 @@ namespace aster
 {
 
 // 与 assets/shader/vulkan/mesh.* 中 push constant 块保持一致：
-//   mat4 model (64) + vec4 color (16) + vec4 shadow (16) = 96 字节
+//   mat4 model (64) + vec4 color (16) + vec4 shadow (16) + vec4 material (16) = 112 字节
+//   material = (粗糙度, 金属度, AO, 纹理索引)
 struct MeshPushConstants
 {
     glm::mat4 model;
     glm::vec4 color;
-    glm::vec4 shadow; // xyz=阴影灯光位置, w=阴影投影平面Y（0=非阴影绘制）
+    glm::vec4 shadow;  // xyz=阴影灯光位置, w=阴影投影平面Y（0=非阴影绘制）
+    glm::vec4 material; // (粗糙度, 金属度, AO, 纹理索引)
 };
 
 // Vulkan NDC 的 y 轴向下，而 glm::perspective 是 OpenGL 风格（y 轴向上）。
@@ -82,7 +84,13 @@ bool VulkanSceneRenderer::Init(VkDevice device, VkPhysicalDevice physicalDevice,
 
     return true;
 }
-
+int VulkanSceneRenderer::RegisterMaterialTexture(VkQueue queue, VkCommandPool cmdPool,
+                                                 const uint8_t *rgba8, int width, int height)
+{
+    if (!pipeline)
+        return -1;
+    return pipeline->RegisterMaterialTexture(queue, cmdPool, rgba8, width, height);
+}
 bool VulkanSceneRenderer::UploadEnvironmentMap(VkQueue queue, VkCommandPool cmdPool,
                                                const EnvironmentMap &env)
 {
@@ -115,11 +123,11 @@ void VulkanSceneRenderer::BeginFrame()
 
 void VulkanSceneRenderer::Submit(const VulkanMeshBuffer &mesh,
                                  const glm::mat4 &model, const glm::vec4 &color,
-                                 bool castsShadow)
+                                 const glm::vec4 &material, bool castsShadow)
 {
     if (!pipeline)
         return;
-    drawCalls.push_back({&mesh, model, color, castsShadow});
+    drawCalls.push_back({&mesh, model, color, material, castsShadow});
 }
 
 void VulkanSceneRenderer::SetLights(const LightUBO &lights)
@@ -315,6 +323,7 @@ void VulkanSceneRenderer::Record(VkCommandBuffer cmd, const glm::mat4 &view, con
         MeshPushConstants pc{};
         pc.model = call.model;
         pc.color = call.color;
+        pc.material = call.material;
 
         vkCmdPushConstants(cmd, pipeline->GetLayout(),
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

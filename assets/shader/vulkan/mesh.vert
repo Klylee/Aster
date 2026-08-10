@@ -3,8 +3,9 @@
 // Vulkan 网格顶点着色器（与 VulkanSceneRenderer 的顶点布局对应）：
 //   顶点格式（与框架 Mesh 一致）：pos3 + nor3 + uv2（stride 32 字节）
 //   set 0 binding 0 : CameraUBO（view / projection）
-//   push constants  : mat4 model + vec4 color + vec4 shadow（96 字节）
+//   push constants  : mat4 model + vec4 color + vec4 shadow + vec4 material（112 字节）
 //     shadow = (灯光位置.xyz, 阴影投影平面Y)；shadow.w==0 表示非阴影绘制
+//     material = (粗糙度, 金属度, AO, 纹理索引)
 
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
@@ -19,6 +20,7 @@ layout(push_constant) uniform PushConstants {
     mat4 model;
     vec4 color;
     vec4 shadow;
+    vec4 material; // x=粗糙度, y=金属度, z=AO, w=纹理索引
 } pc;
 
 layout(location = 0) out vec3 vNormal;

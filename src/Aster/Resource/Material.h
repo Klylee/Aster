@@ -44,6 +44,13 @@ public:
     // OpenGL 后端配合 shader 的 _color uniform 使用。
     glm::vec4 color = glm::vec4(1.0f);
 
+    // ---- 每对象材质参数（Vulkan 后端经 push constant 传入 mesh shader） ----
+    float roughness = 0.35f; // 粗糙度（高光 IBL / 高光分布）
+    float metallic = 0.0f;   // 金属度
+    float ao = 1.0f;         // 环境光遮蔽
+    int textureIndex = -1;   // M2：材质纹理索引（-1=无纹理）
+    int vulkanPipeline = 0;  // M3：自定义 shader 管线索引（0=默认 mesh）
+
     // 允许不带 shader 构造（Vulkan 场景演示 / 程序化材质），
     // OpenGL 渲染路径仍需 shader。
     Material() = default;
