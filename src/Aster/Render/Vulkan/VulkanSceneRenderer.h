@@ -1,0 +1,126 @@
+#pragma once
+
+#include <string>
+#include <vector>
+
+#include <vulkan/vulkan.h>
+#include <glm/glm.hpp>
+#include "LightData.h" // LightUBO：灯光数据透传给管线片元 UBO
+#include "EnvironmentMap.h" // 环境贴图数据（上传到管线）
+
+namespace aster
+{
+class VulkanPipeline;
+class VulkanMeshBuffer;
+
+// ============================================================================
+// VulkanSceneRenderer —— Vulkan 场景渲染器（对应框架 Renderer 的 Vulkan 版）
+// ----------------------------------------------------------------------------
+// 每帧流程：
+//   BeginFrame()                // 清空绘制列表
+//   Submit(mesh, model, color)  // 记录绘制（网格 + 模型矩阵 + 材质颜色）
+//   Record(cmd, view, proj)     // 更新相机 UBO、绑定管线、逐条录制绘制
+//
+// 与框架 Mesh / Material 的对应：
+//   - 网格  -> VulkanMeshBuffer（顶点/索引缓冲）
+//   - 材质  -> 目前支持单颜色（对应 .shader 中的 uniform vec4 color）
+//   - 渲染器 -> 本类（相机 view/projection 通过相机 UBO 传入）
+//
+// 顶点布局与框架 Mesh 一致：pos3 + nor3 + uv2（stride 8 * sizeof(float) = 32B），
+// 对应着色器 assets/shader/vulkan/mesh.vert/.frag。
+// ============================================================================
+
+class VulkanSceneRenderer
+{
+public:
+    VulkanSceneRenderer() = default;
+    ~VulkanSceneRenderer() { Shutdown(); }
+    VulkanSceneRenderer(const VulkanSceneRenderer &) = delete;
+    VulkanSceneRenderer &operator=(const VulkanSceneRenderer &) = delete;
+
+    // shaderDir: 存放 mesh.vert.spv / mesh.frag.spv 的目录
+    // queue / cmdPool：创建环境贴图占位资源（布局转换）用
+    bool Init(VkDevice device, VkPhysicalDevice physicalDevice, VkRenderPass renderPass,
+              VkQueue queue, VkCommandPool cmdPool, const std::string &shaderDir);
+
+    void Shutdown();
+
+    void BeginFrame();
+    void Submit(const VulkanMeshBuffer &mesh, const glm::mat4 &model, const glm::vec4 &color,
+                bool castsShadow = true);
+    // 录制阴影映射 pass（必须在主 render pass 开始前调用，Present 中先于主 pass）
+    void RecordShadow(VkCommandBuffer cmd);
+    void Record(VkCommandBuffer cmd, const glm::mat4 &view, const glm::mat4 &proj);
+
+    // 设置本帧灯光数据（App 每帧调用；Record 时上传到灯光 UBO）
+    void SetLights(const LightUBO &lights);
+
+    // 设置平面投影阴影的接收平面高度（y）。默认 0.02。
+    // 场景中存在 SpotLight 时，castsShadow 的网格会把阴影压到该平面绘制。
+    void SetShadowPlane(float y) { shadowPlaneY_ = y; }
+
+    // 软阴影开关：true = PCF 软阴影，false = 硬阴影
+    void SetSoftShadow(bool soft) { softShadow_ = soft; }
+
+    // shadowmap 调试视图：0=正常，1=显示 2D shadow map 深度，2=显示点光源 cubemap 深度
+    void SetShadowDebugView(int mode) { shadowDebugView_ = mode; }
+
+    // ---- 环境贴图（IBL） ----
+    // 上传环境贴图（cubemap / irradiance / 预过滤 / BRDF LUT）到管线。
+    // 返回 false 表示上传失败（环境功能不可用）。
+    bool UploadEnvironmentMap(VkQueue queue, VkCommandPool cmdPool,
+                              const EnvironmentMap &env);
+
+    // 环境模式：0=关闭，1=反射，2=漫反射 IBL，3=漫反射+高光 IBL（PBR）
+    void SetEnvMode(int mode) { envMode_ = mode; }
+
+    // 环境参数：强度 / 粗糙度 / 金属度 / AO / 方位角(弧度) / 曝光 / 是否 tone map
+    void SetEnvParams(float intensity, float roughness, float metallic, float ao,
+                      float yaw, float exposure, bool toneMap)
+    {
+        envIntensity_ = intensity;
+        envRoughness_ = roughness;
+        envMetallic_ = metallic;
+        envAO_ = ao;
+        envYaw_ = yaw;
+        envExposure_ = exposure;
+        envToneMap_ = toneMap;
+    }
+
+    // 环境贴图是否已上传（有真实数据，天空盒 + IBL 可用）
+    bool HasEnvironment() const;
+
+    bool IsReady() const { return pipeline != nullptr; }
+
+private:
+    struct DrawCall
+    {
+        const VulkanMeshBuffer *mesh = nullptr;
+        glm::mat4 model;
+        glm::vec4 color;
+        bool castsShadow = true;
+    };
+
+    VkDevice device = VK_NULL_HANDLE;
+    VulkanPipeline *pipeline = nullptr;
+    std::vector<DrawCall> drawCalls;
+
+    LightUBO lights_{};
+    bool hasLights_ = false;
+    float shadowPlaneY_ = 0.02f; // 平面投影阴影的接收平面高度
+    bool softShadow_ = true;     // 软阴影开关
+    int shadowDebugView_ = 0;    // shadowmap 调试视图
+
+    // 环境贴图状态（每帧 Record 时写入 EnvUBO）
+    int envMode_ = 0;             // 0=关闭, 1=反射, 2=漫反射 IBL, 3=漫反射+高光 IBL
+    float envIntensity_ = 1.0f;   // 环境光强度
+    float envRoughness_ = 0.3f;   // 材质粗糙度（高光 IBL）
+    float envMetallic_ = 0.0f;    // 金属度
+    float envAO_ = 1.0f;          // 环境光遮蔽
+    float envYaw_ = 0.0f;         // 环境方位角（弧度）
+    float envExposure_ = 1.0f;    // 曝光
+    bool envToneMap_ = true;      // 是否 tone map
+};
+
+} // namespace aster
+
