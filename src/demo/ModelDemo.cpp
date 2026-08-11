@@ -147,6 +147,7 @@ bool ModelDemoApp::InitScene()
         Vec3 lookTarget(0.0f, 2.0f, 0.0f);
         Vec3 dir = glm::normalize(lookTarget - cam->transform.GetPosition());
         cam->transform.Rotate(Vec3(0.0f, 0.0f, -1.0f), dir);
+        cam->speed = 4.0f;
     }
 
     // ---- 全局材质管理器（MaterialManager）：Shader / 材质复用 ----
