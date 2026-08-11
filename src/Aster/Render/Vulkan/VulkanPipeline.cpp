@@ -2350,7 +2350,9 @@ int VulkanPipeline::RegisterMaterialTexture(VkQueue queue, VkCommandPool cmdPool
 
 int VulkanPipeline::CreateMaterialPipeline(const std::string &shaderDir,
                                            const std::string &vertName,
-                                           const std::string &fragName)
+                                           const std::string &fragName,
+                                           bool enableBlend, bool enableDepthWrite,
+                                           float depthBias)
 {
     if (!device)
         return -1;
@@ -2408,7 +2410,11 @@ int VulkanPipeline::CreateMaterialPipeline(const std::string &shaderDir,
     rasterizer.lineWidth = 1.0f;
     rasterizer.cullMode = VK_CULL_MODE_NONE; // 与主管线一致（双面渲染）
     rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    rasterizer.depthBiasEnable = VK_FALSE;
+    // depthBias：贴地叠加层（网格线）向相机偏移，消除与地面 z-fight
+    rasterizer.depthBiasEnable = (depthBias != 0.0f) ? VK_TRUE : VK_FALSE;
+    rasterizer.depthBiasConstantFactor = depthBias;
+    rasterizer.depthBiasSlopeFactor = 0.0f;
+    rasterizer.depthBiasClamp = 0.0f;
 
     VkPipelineMultisampleStateCreateInfo multisampling{};
     multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -2418,7 +2424,7 @@ int VulkanPipeline::CreateMaterialPipeline(const std::string &shaderDir,
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable = VK_TRUE;
-    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = enableDepthWrite ? VK_TRUE : VK_FALSE;
     depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable = VK_FALSE;
@@ -2426,7 +2432,16 @@ int VulkanPipeline::CreateMaterialPipeline(const std::string &shaderDir,
     VkPipelineColorBlendAttachmentState blendAttachment{};
     blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                      VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    blendAttachment.blendEnable = VK_FALSE;
+    blendAttachment.blendEnable = enableBlend ? VK_TRUE : VK_FALSE;
+    if (enableBlend) // 标准 alpha 混合（半透明网格线）
+    {
+        blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    }
     VkPipelineColorBlendStateCreateInfo colorBlending{};
     colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     colorBlending.logicOpEnable = VK_FALSE;

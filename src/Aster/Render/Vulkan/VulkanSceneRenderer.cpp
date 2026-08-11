@@ -239,11 +239,14 @@ void VulkanSceneRenderer::Submit(const VulkanMeshBuffer &mesh,
 
 int VulkanSceneRenderer::CreateMaterialPipeline(const std::string &shaderDir,
                                                 const std::string &vertName,
-                                                const std::string &fragName)
+                                                const std::string &fragName,
+                                                bool enableBlend, bool enableDepthWrite,
+                                                float depthBias)
 {
     if (!pipeline)
         return -1;
-    return pipeline->CreateMaterialPipeline(shaderDir, vertName, fragName);
+    return pipeline->CreateMaterialPipeline(shaderDir, vertName, fragName,
+                                            enableBlend, enableDepthWrite, depthBias);
 }
 
 void VulkanSceneRenderer::SetLights(const LightUBO &lights)

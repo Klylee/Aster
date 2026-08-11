@@ -66,6 +66,8 @@ if(ASTER_VULKAN_AVAILABLE)
             skybox.frag
             toon.vert
             toon.frag
+            grid.vert
+            grid.frag
         )
         set(VULKAN_SPV_OUTPUTS "")
         foreach(SHADER ${VULKAN_SHADERS})

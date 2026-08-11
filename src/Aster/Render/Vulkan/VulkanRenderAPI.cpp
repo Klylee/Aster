@@ -1021,11 +1021,14 @@ int VulkanRenderAPI::RegisterMaterialTexture(const uint8_t *rgba8, int width, in
 }
 
 int VulkanRenderAPI::CreateMaterialPipeline(const std::string &vertName,
-                                            const std::string &fragName)
+                                            const std::string &fragName,
+                                            bool enableBlend, bool enableDepthWrite,
+                                            float depthBias)
 {
     if (!sceneRenderer)
         return -1;
-    return sceneRenderer->CreateMaterialPipeline(VULKAN_SHADER_DIR, vertName, fragName);
+    return sceneRenderer->CreateMaterialPipeline(VULKAN_SHADER_DIR, vertName, fragName,
+                                                 enableBlend, enableDepthWrite, depthBias);
 }
 
 void VulkanRenderAPI::RenderShadowMap(VkCommandBuffer cmd)

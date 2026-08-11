@@ -196,6 +196,7 @@ bool ModelDemoApp::InitScene()
     planeModel->objName = "ground";
     planeModel->castsShadow = false; // 地面是接收体，不投影阴影
     planeModel->meshes.push_back(planeMesh);
+    planeModel->transform.SetPosition(Vec3(0.0f, -1.0f, 0.0f));
     planeModel->material = registerMaterial("ground", glm::vec4(0.55f, 0.55f, 0.58f, 1.0f));
     groundMaterial = planeModel->material; // 保存引用（OpenGL 每帧更新环境 uniform）
     // M1：地面设为哑光材质（roughness=1 不反射环境），体现每对象材质差异
@@ -220,6 +221,44 @@ bool ModelDemoApp::InitScene()
         groundMaterial->SetUniform("specPow", "float", toonSpecPow);
         groundMaterial->SetUniform("rimStrength", "float", toonRim);
         groundMaterial->SetUniform("toonTint", "vec3f", toonTint);
+
+        // ---- 地面网格线（自定义 grid shader + M4 自定义 uniform）----
+        // 大平面在片元里程序化画网格线：格内 discard 只留线框，按距离淡出。
+        // 管线开启 alpha 混合（透明度）、关闭深度写（不遮挡后面的地面/球体）；
+        // depthBias=4 把网格整体向相机偏移几个深度单位，贴地时稳定胜出、不 z-fight。
+        gridPipeline = vk->CreateMaterialPipeline("grid.vert", "grid.frag",
+                                                  /*enableBlend=*/true,
+                                                  /*enableDepthWrite=*/false,
+                                                  /*depthBias=*/4.0f);
+        if (gridPipeline > 0)
+        {
+            std::vector<float> gPos, gNor;
+            std::vector<unsigned int> gIdx;
+            BuildPlane(600.0f, gPos, gNor, gIdx); // 大平面：网格延伸很远（±300）
+            auto gridMesh = std::make_shared<Mesh>(gPos, gIdx, gNor);
+            gridMesh->initialize();
+
+            gridMaterial = mm.RegisterMaterial("ground_grid", glm::vec4(0.1f, 0.85f, 0.45f, 1.0f));
+            gridMaterial->vulkanPipeline = gridPipeline;
+            // M4：自定义 uniform —— 每个 uniform 占一个 vec4 槽位，注册顺序与
+            // grid.frag 的 params 下标一一对应：
+            //   params[0].rgb=gridColor / [1].x=opacity / [2].x=cellSize /
+            //   [3].x=fadeStart / [4].x=fadeEnd / [5].x=lineWidth
+            gridMaterial->SetUniform("gridColor", "vec3f", gridColor);
+            gridMaterial->SetUniform("opacity", "float", gridOpacity);
+            gridMaterial->SetUniform("cellSize", "float", gridCellSize);
+            gridMaterial->SetUniform("fadeStart", "float", gridFadeStart);
+            gridMaterial->SetUniform("fadeEnd", "float", gridFadeEnd);
+            gridMaterial->SetUniform("lineWidth", "float", gridLineWidth);
+
+            gridModel = std::make_shared<Model>();
+            gridModel->objName = "ground_grid";
+            gridModel->castsShadow = false; // 自定义管线不进阴影 pass
+            gridModel->meshes.push_back(gridMesh);
+            gridModel->material = gridMaterial;
+            gridModel->transform.SetPosition(Vec3(0.0f, 0.02f, 0.0f)); // 略高于地面防 z-fight
+            SceneManager::Instance().AddObject(gridModel);
+        }
     }
 #endif
 
@@ -423,6 +462,17 @@ void ModelDemoApp::Update()
                 applyEnvTo(groundMaterial);
             }
         }
+
+        // M4：每帧同步地面网格线材质的自定义 uniform（滑块实时生效，Vulkan 专用）
+        if (renderAPI->IsVulkan() && gridMaterial && gridPipeline > 0)
+        {
+            gridMaterial->SetUniform("gridColor", "vec3f", gridColor);
+            gridMaterial->SetUniform("opacity", "float", gridOpacity);
+            gridMaterial->SetUniform("cellSize", "float", gridCellSize);
+            gridMaterial->SetUniform("fadeStart", "float", gridFadeStart);
+            gridMaterial->SetUniform("fadeEnd", "float", gridFadeEnd);
+            gridMaterial->SetUniform("lineWidth", "float", gridLineWidth);
+        }
     }
 
     // 模型自转
@@ -508,6 +558,28 @@ void ModelDemoApp::RenderImGui()
     else
     {
         ImGui::TextWrapped("(Only available on the Vulkan backend with the toon pipeline.)");
+    }
+
+    // ---- 地面网格线（自定义 grid shader）控制 ----
+    // 全部参数经 Material::SetUniform(key,type,value) 设置（Vulkan binding 12 动态 UBO）。
+    ImGui::Separator();
+    ImGui::Text("Ground Grid (custom shader, Vulkan)");
+    ImGui::TextWrapped("Procedural grid lines in grid.frag; params via SetUniform "
+                       "(color/opacity/cellSize/fade/lineWidth).");
+    if (renderAPI && renderAPI->IsVulkan() && gridPipeline > 0)
+    {
+        ImGui::SliderFloat("Grid Cell Size", &gridCellSize, 0.5f, 10.0f, "%.2f");
+        ImGui::ColorEdit3("Grid Color", glm::value_ptr(gridColor));
+        ImGui::SliderFloat("Grid Opacity", &gridOpacity, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Grid Line Width", &gridLineWidth, 0.002f, 0.15f, "%.3f");
+        ImGui::SliderFloat("Grid Fade Start", &gridFadeStart, 0.0f, 100.0f, "%.1f");
+        ImGui::SliderFloat("Grid Fade End", &gridFadeEnd, gridFadeStart + 1.0f, 400.0f, "%.1f");
+        ImGui::TextWrapped("Lines fade out with distance (fadeStart -> fadeEnd). "
+                           "Cell size is in world units.");
+    }
+    else
+    {
+        ImGui::TextWrapped("(Only available on the Vulkan backend with the grid pipeline.)");
     }
 
     // ---- 环境贴图（HDR IBL）控制 ----

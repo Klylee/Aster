@@ -81,7 +81,11 @@ public:
     // 创建自定义顶点/片元材质管线（共享描述集布局/顶点布局/push constants），
     // 返回索引（1 起；0 = 默认 mesh 管线）。vertName/fragName 如 "toon.vert"/"toon.frag"，
     // 从编译好的 SPIR-V 目录（VULKAN_SHADER_DIR）读取。
-    int CreateMaterialPipeline(const std::string &vertName, const std::string &fragName);
+    // enableBlend / enableDepthWrite：混合 / 深度写开关（半透明网格线等）。
+    // depthBias：多边形深度偏移（贴地叠加层消除 z-fight）。
+    int CreateMaterialPipeline(const std::string &vertName, const std::string &fragName,
+                               bool enableBlend = false, bool enableDepthWrite = true,
+                               float depthBias = 0.0f);
 
     RenderAPIType Type() const override { return RenderAPIType::Vulkan; }
     const char *Name() const override { return "Vulkan"; }

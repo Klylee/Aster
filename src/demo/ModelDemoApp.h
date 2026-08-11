@@ -56,6 +56,17 @@ private:
     float toonSpecPow = 24.0f;     // params[1].x 高光幂
     float toonRim = 0.3f;          // params[2].x 边缘暗化强度
     glm::vec3 toonTint = glm::vec3(1.0f); // params[3].rgb 卡通染色
+
+    // ---- 地面网格线（自定义 grid shader，M4 自定义 uniform）----
+    std::shared_ptr<Model> gridModel;    // 网格线物体（大平面 + grid 材质）
+    std::shared_ptr<Material> gridMaterial; // 网格线材质
+    int gridPipeline = -1;               // 自定义 grid 管线索引（混合开启 / 深度写关闭）
+    glm::vec3 gridColor = glm::vec3(0.10f, 0.85f, 0.45f); // params[0].rgb 线框颜色
+    float gridOpacity = 0.6f;            // params[1].x 透明度
+    float gridCellSize = 1.0f;           // params[2].x 格子边长（世界单位）
+    float gridFadeStart = 10.0f;         // params[3].x 距离淡出起点
+    float gridFadeEnd = 120.0f;          // params[4].x 距离淡出终点
+    float gridLineWidth = 0.04f;         // params[5].x 线宽（相对格子比例）
     float rotationTime = 0.0f;
     bool softShadow = true;      // 软阴影开关（ImGui 按钮切换）
     int shadowDebugView = 0;     // shadowmap 调试视图（0=正常，1=2D，2=点光源 cubemap）

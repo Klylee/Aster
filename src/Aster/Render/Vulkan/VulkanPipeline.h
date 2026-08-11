@@ -84,8 +84,14 @@ public:
     // 自定义材质管线（顶点+片元 SPIR-V）。返回索引：0 = 默认 mesh 管线，自定义从 1 起。
     // shaderDir = 存放 spv 的目录；vertName/fragName 如 "toon.vert"/"toon.frag"。
     // 所有管线共用同一描述符集（相机/灯光/环境/材质纹理），自定义管线可访问全部绑定。
+    // enableBlend：开启 alpha 混合（半透明网格线等）；enableDepthWrite：是否写深度
+    // （半透明叠加层通常关掉，避免遮挡后面的物体）。
+    // depthBias：多边形深度偏移（constant factor，>0 向相机偏移）。用于贴地叠加层
+    // （如网格线）消除与地面/底面的 z-fight（即使物理高度差很小也能稳定胜出）。
     int CreateMaterialPipeline(const std::string &shaderDir,
-                               const std::string &vertName, const std::string &fragName);
+                               const std::string &vertName, const std::string &fragName,
+                               bool enableBlend = false, bool enableDepthWrite = true,
+                               float depthBias = 0.0f);
     // 取自定义材质管线（index 从 1 起；0 或非法返回 VK_NULL_HANDLE）
     VkPipeline GetMaterialPipeline(int index) const;
     // 已创建自定义管线数量
