@@ -665,6 +665,8 @@ void VulkanPipeline::Destroy()
         vkDestroyBuffer(device, materialParamsBuffer, nullptr);
         materialParamsBuffer = VK_NULL_HANDLE;
     }
+    // 拾取 id map
+    DestroyPickMap();
     if (skyboxPipeline)
     {
         vkDestroyPipeline(device, skyboxPipeline, nullptr);
@@ -2348,14 +2350,16 @@ int VulkanPipeline::RegisterMaterialTexture(VkQueue queue, VkCommandPool cmdPool
     return index;
 }
 
-int VulkanPipeline::CreateMaterialPipeline(const std::string &shaderDir,
-                                           const std::string &vertName,
-                                           const std::string &fragName,
-                                           bool enableBlend, bool enableDepthWrite,
-                                           float depthBias)
+// 内部实现：创建一条自定义管线（顶点+片元 SPIR-V），绑定到指定 renderPass。
+// 返回 VkPipeline（不加入 materialPipelines 列表），失败返回 VK_NULL_HANDLE。
+VkPipeline VulkanPipeline::CreateMaterialPipelineImpl(const std::string &shaderDir,
+                                                      const std::string &vertName,
+                                                      const std::string &fragName,
+                                                      VkRenderPass renderPass, bool enableBlend,
+                                                      bool enableDepthWrite, float depthBias)
 {
     if (!device)
-        return -1;
+        return VK_NULL_HANDLE;
 
     auto withExt = [](std::string n) -> std::string
     {
@@ -2371,7 +2375,7 @@ int VulkanPipeline::CreateMaterialPipeline(const std::string &shaderDir,
     {
         std::cerr << "[VulkanPipeline] Material shaders missing: "
                   << vName << " / " << fName << std::endl;
-        return -1;
+        return VK_NULL_HANDLE;
     }
     VkShaderModule vertMod = CreateShaderModule(device, vertCode);
     VkShaderModule fragMod = CreateShaderModule(device, fragCode);
@@ -2467,7 +2471,7 @@ int VulkanPipeline::CreateMaterialPipeline(const std::string &shaderDir,
     pipelineInfo.pColorBlendState = &colorBlending;
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = layout;      // 共享描述集布局 + push constants
-    pipelineInfo.renderPass = renderPass_;
+    pipelineInfo.renderPass = renderPass;
     pipelineInfo.subpass = 0;
 
     VkPipeline p = VK_NULL_HANDLE;
@@ -2476,13 +2480,27 @@ int VulkanPipeline::CreateMaterialPipeline(const std::string &shaderDir,
     vkDestroyShaderModule(device, fragMod, nullptr);
     if (r != VK_SUCCESS || p == VK_NULL_HANDLE)
     {
-        std::cerr << "[VulkanPipeline] Failed to create material pipeline" << std::endl;
-        return -1;
+        std::cerr << "[VulkanPipeline] Failed to create material pipeline"
+                  << " (" << vName << ", " << fName << ")" << std::endl;
+        return VK_NULL_HANDLE;
     }
+    return p;
+}
+
+int VulkanPipeline::CreateMaterialPipeline(const std::string &shaderDir,
+                                           const std::string &vertName,
+                                           const std::string &fragName,
+                                           bool enableBlend, bool enableDepthWrite,
+                                           float depthBias)
+{
+    VkPipeline p = CreateMaterialPipelineImpl(shaderDir, vertName, fragName,
+                                              renderPass_, enableBlend, enableDepthWrite, depthBias);
+    if (!p)
+        return -1;
     materialPipelines.push_back(p);
     int index = (int)materialPipelines.size(); // 0 = 默认 mesh，自定义从 1 起
     std::cout << "[VulkanPipeline] Material pipeline created: idx=" << index
-              << " (" << vName << ", " << fName << ")" << std::endl;
+              << " (" << vertName << ", " << fragName << ")" << std::endl;
     return index;
 }
 
@@ -2491,6 +2509,363 @@ VkPipeline VulkanPipeline::GetMaterialPipeline(int index) const
     if (index <= 0 || index > (int)materialPipelines.size())
         return VK_NULL_HANDLE;
     return materialPipelines[index - 1];
+}
+
+// ============================================================================
+// 拾取 id map（离屏渲染 + 读回，用于鼠标拾取）
+// ============================================================================
+namespace
+{
+VkFormat PickFindDepthFormat(VkPhysicalDevice physicalDevice)
+{
+    const VkFormat candidates[] = {VK_FORMAT_D32_SFLOAT,
+                                   VK_FORMAT_D32_SFLOAT_S8_UINT,
+                                   VK_FORMAT_D24_UNORM_S8_UINT};
+    for (VkFormat f : candidates)
+    {
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, f, &props);
+        if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+            return f;
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+} // namespace
+
+bool VulkanPipeline::EnablePickMap(const std::string &shaderDir, uint32_t width, uint32_t height)
+{
+    if (!device)
+        return false;
+    DestroyPickMap();
+
+    pickWidth = std::max(width, 1u);
+    pickHeight = std::max(height, 1u);
+
+    auto fail = [&](const char *msg) -> bool
+    {
+        std::cerr << "[VulkanPipeline] " << msg << std::endl;
+        DestroyPickMap();
+        return false;
+    };
+
+    // ---- 拾取颜色图（R8G8B8A8，ID 编码；COLOR_ATTACHMENT + TRANSFER_SRC 供拷贝读回） ----
+    VkImageCreateInfo imgInfo{};
+    imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgInfo.imageType = VK_IMAGE_TYPE_2D;
+    imgInfo.extent = {pickWidth, pickHeight, 1};
+    imgInfo.mipLevels = 1;
+    imgInfo.arrayLayers = 1;
+    imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imgInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    imgInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    if (vkCreateImage(device, &imgInfo, nullptr, &pickImage) != VK_SUCCESS)
+        return fail("Failed to create pick image");
+    {
+        VkMemoryRequirements mr;
+        vkGetImageMemoryRequirements(device, pickImage, &mr);
+        uint32_t mt = FindMemoryType(physicalDevice, mr.memoryTypeBits,
+                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VkMemoryAllocateInfo ai{};
+        ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        ai.allocationSize = mr.size;
+        ai.memoryTypeIndex = mt;
+        if (mt == std::numeric_limits<uint32_t>::max() ||
+            vkAllocateMemory(device, &ai, nullptr, &pickImageMemory) != VK_SUCCESS ||
+            vkBindImageMemory(device, pickImage, pickImageMemory, 0) != VK_SUCCESS)
+            return fail("Failed to alloc/bind pick image memory");
+    }
+    {
+        VkImageViewCreateInfo vi{};
+        vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vi.image = pickImage;
+        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vi.format = VK_FORMAT_R8G8B8A8_UNORM;
+        vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vi.subresourceRange.levelCount = 1;
+        vi.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(device, &vi, nullptr, &pickImageView) != VK_SUCCESS)
+            return fail("Failed to create pick image view");
+    }
+
+    // ---- 拾取深度图（与主深度分离，保证遮挡正确） ----
+    VkFormat pickDepthFormat = PickFindDepthFormat(physicalDevice);
+    if (pickDepthFormat == VK_FORMAT_UNDEFINED)
+        return fail("No depth format for pick map");
+    imgInfo.format = pickDepthFormat;
+    imgInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if (vkCreateImage(device, &imgInfo, nullptr, &pickDepthImage) != VK_SUCCESS)
+        return fail("Failed to create pick depth image");
+    {
+        VkMemoryRequirements mr;
+        vkGetImageMemoryRequirements(device, pickDepthImage, &mr);
+        uint32_t mt = FindMemoryType(physicalDevice, mr.memoryTypeBits,
+                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VkMemoryAllocateInfo ai{};
+        ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        ai.allocationSize = mr.size;
+        ai.memoryTypeIndex = mt;
+        if (mt == std::numeric_limits<uint32_t>::max() ||
+            vkAllocateMemory(device, &ai, nullptr, &pickDepthMemory) != VK_SUCCESS ||
+            vkBindImageMemory(device, pickDepthImage, pickDepthMemory, 0) != VK_SUCCESS)
+            return fail("Failed to alloc/bind pick depth memory");
+    }
+    {
+        VkImageViewCreateInfo vi{};
+        vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vi.image = pickDepthImage;
+        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vi.format = pickDepthFormat;
+        vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        vi.subresourceRange.levelCount = 1;
+        vi.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(device, &vi, nullptr, &pickDepthView) != VK_SUCCESS)
+            return fail("Failed to create pick depth view");
+    }
+
+    // ---- 拾取 render pass（颜色 CLEAR->STORE，UNDEFINED->TRANSFER_SRC 供拷贝；深度 CLEAR） ----
+    VkAttachmentDescription colorAttach{};
+    colorAttach.format = VK_FORMAT_R8G8B8A8_UNORM;
+    colorAttach.samples = VK_SAMPLE_COUNT_1_BIT;
+    colorAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    colorAttach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttach.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    colorAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    colorAttach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    colorAttach.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+
+    VkAttachmentDescription depthAttach{};
+    depthAttach.format = pickDepthFormat;
+    depthAttach.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttach.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttach.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthAttach.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference colorRef{};
+    colorRef.attachment = 0;
+    colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference depthRef{};
+    depthRef.attachment = 1;
+    depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorRef;
+    subpass.pDepthStencilAttachment = &depthRef;
+
+    VkSubpassDependency deps[2]{};
+    deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    deps[0].dstSubpass = 0;
+    deps[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                           VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                           VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    deps[1].srcSubpass = 0;
+    deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    deps[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    deps[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT; // 颜色写对随后拷贝读可见
+
+    std::array<VkAttachmentDescription, 2> attachments = {colorAttach, depthAttach};
+    VkRenderPassCreateInfo rpInfo{};
+    rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    rpInfo.attachmentCount = (uint32_t)attachments.size();
+    rpInfo.pAttachments = attachments.data();
+    rpInfo.subpassCount = 1;
+    rpInfo.pSubpasses = &subpass;
+    rpInfo.dependencyCount = 2;
+    rpInfo.pDependencies = deps;
+    if (vkCreateRenderPass(device, &rpInfo, nullptr, &pickRenderPass) != VK_SUCCESS)
+        return fail("Failed to create pick render pass");
+
+    // ---- 拾取 framebuffer ----
+    VkImageView fbViews[] = {pickImageView, pickDepthView};
+    VkFramebufferCreateInfo fbInfo{};
+    fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbInfo.renderPass = pickRenderPass;
+    fbInfo.attachmentCount = 2;
+    fbInfo.pAttachments = fbViews;
+    fbInfo.width = pickWidth;
+    fbInfo.height = pickHeight;
+    fbInfo.layers = 1;
+    if (vkCreateFramebuffer(device, &fbInfo, nullptr, &pickFramebuffer) != VK_SUCCESS)
+        return fail("Failed to create pick framebuffer");
+
+    // ---- 拾取管线（mesh.vert + id.frag：输出 push constant color = 编码的拾取 ID） ----
+    pickPipeline = CreateMaterialPipelineImpl(shaderDir, "mesh.vert", "id.frag",
+                                              pickRenderPass,
+                                              /*enableBlend=*/false,
+                                              /*enableDepthWrite=*/true,
+                                              /*depthBias=*/0.0f);
+    if (!pickPipeline)
+        return fail("Failed to create pick pipeline");
+
+    // ---- 读回缓冲（host-visible + coherent，w*h*4） ----
+    {
+        VkDeviceSize size = (VkDeviceSize)pickWidth * pickHeight * 4;
+        VkBufferCreateInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bi.size = size;
+        bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(device, &bi, nullptr, &pickReadbackBuffer) != VK_SUCCESS)
+            return fail("Failed to create pick readback buffer");
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(device, pickReadbackBuffer, &mr);
+        uint32_t mt = FindMemoryType(physicalDevice, mr.memoryTypeBits,
+                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        VkMemoryAllocateInfo ai{};
+        ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        ai.allocationSize = mr.size;
+        ai.memoryTypeIndex = mt;
+        if (mt == std::numeric_limits<uint32_t>::max() ||
+            vkAllocateMemory(device, &ai, nullptr, &pickReadbackMemory) != VK_SUCCESS ||
+            vkBindBufferMemory(device, pickReadbackBuffer, pickReadbackMemory, 0) != VK_SUCCESS)
+            return fail("Failed to alloc pick readback buffer memory");
+        vkMapMemory(device, pickReadbackMemory, 0, size, 0, &pickReadbackMapped);
+    }
+
+    pickEnabled_ = true;
+    std::cout << "[VulkanPipeline] Pick map enabled: " << pickWidth << "x" << pickHeight << std::endl;
+    return true;
+}
+
+void VulkanPipeline::DestroyPickMap()
+{
+    if (!device)
+        return;
+    if (pickReadbackMapped)
+    {
+        vkUnmapMemory(device, pickReadbackMemory);
+        pickReadbackMapped = nullptr;
+    }
+    if (pickReadbackMemory)
+    {
+        vkFreeMemory(device, pickReadbackMemory, nullptr);
+        pickReadbackMemory = VK_NULL_HANDLE;
+    }
+    if (pickReadbackBuffer)
+    {
+        vkDestroyBuffer(device, pickReadbackBuffer, nullptr);
+        pickReadbackBuffer = VK_NULL_HANDLE;
+    }
+    if (pickPipeline)
+    {
+        vkDestroyPipeline(device, pickPipeline, nullptr);
+        pickPipeline = VK_NULL_HANDLE;
+    }
+    if (pickFramebuffer)
+    {
+        vkDestroyFramebuffer(device, pickFramebuffer, nullptr);
+        pickFramebuffer = VK_NULL_HANDLE;
+    }
+    if (pickRenderPass)
+    {
+        vkDestroyRenderPass(device, pickRenderPass, nullptr);
+        pickRenderPass = VK_NULL_HANDLE;
+    }
+    if (pickDepthView)
+    {
+        vkDestroyImageView(device, pickDepthView, nullptr);
+        pickDepthView = VK_NULL_HANDLE;
+    }
+    if (pickDepthMemory)
+    {
+        vkFreeMemory(device, pickDepthMemory, nullptr);
+        pickDepthMemory = VK_NULL_HANDLE;
+    }
+    if (pickDepthImage)
+    {
+        vkDestroyImage(device, pickDepthImage, nullptr);
+        pickDepthImage = VK_NULL_HANDLE;
+    }
+    if (pickImageView)
+    {
+        vkDestroyImageView(device, pickImageView, nullptr);
+        pickImageView = VK_NULL_HANDLE;
+    }
+    if (pickImageMemory)
+    {
+        vkFreeMemory(device, pickImageMemory, nullptr);
+        pickImageMemory = VK_NULL_HANDLE;
+    }
+    if (pickImage)
+    {
+        vkDestroyImage(device, pickImage, nullptr);
+        pickImage = VK_NULL_HANDLE;
+    }
+    pickWidth = pickHeight = 0;
+    pickEnabled_ = false;
+}
+
+void VulkanPipeline::BeginPickPass(VkCommandBuffer cmd)
+{
+    if (!pickEnabled_)
+        return;
+    VkRenderPassBeginInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    info.renderPass = pickRenderPass;
+    info.framebuffer = pickFramebuffer;
+    info.renderArea.offset = {0, 0};
+    info.renderArea.extent = {pickWidth, pickHeight};
+    std::array<VkClearValue, 2> clear{};
+    clear[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}}; // 背景 ID = 0（未命中）
+    clear[1].depthStencil = {1.0f, 0};
+    info.clearValueCount = (uint32_t)clear.size();
+    info.pClearValues = clear.data();
+    vkCmdBeginRenderPass(cmd, &info, VK_SUBPASS_CONTENTS_INLINE);
+
+    // 拾取 render pass 的视口/裁剪（动态状态，每 pass 需重新设置）
+    VkViewport vp{0.0f, 0.0f, (float)pickWidth, (float)pickHeight, 0.0f, 1.0f};
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    VkRect2D sc{{0, 0}, {pickWidth, pickHeight}};
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+}
+
+void VulkanPipeline::EndPickPass(VkCommandBuffer cmd)
+{
+    if (!pickEnabled_)
+        return;
+    vkCmdEndRenderPass(cmd);
+}
+
+void VulkanPipeline::CopyPickMapToBuffer(VkCommandBuffer cmd)
+{
+    if (!pickEnabled_ || !pickReadbackBuffer)
+        return;
+    VkBufferImageCopy region{};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {pickWidth, pickHeight, 1};
+    vkCmdCopyImageToBuffer(cmd, pickImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           pickReadbackBuffer, 1, &region);
+}
+
+int VulkanPipeline::ReadPickID(int x, int y) const
+{
+    if (!pickEnabled_ || !pickReadbackMapped)
+        return 0;
+    if (x < 0 || x >= (int)pickWidth || y < 0 || y >= (int)pickHeight)
+        return 0;
+    const uint8_t *p = (const uint8_t *)pickReadbackMapped +
+                       (size_t)(y * pickWidth + x) * 4;
+    return p[0] | (p[1] << 8) | (p[2] << 16);
 }
 
 bool VulkanPipeline::UploadEnvironmentMap(VkQueue queue, VkCommandPool cmdPool,

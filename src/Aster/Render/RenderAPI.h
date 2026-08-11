@@ -59,6 +59,7 @@ struct GLFWwindow;
 
 namespace aster
 {
+class Model; // 前向声明：PickAt 返回被拾取的 Model 指针
 
 enum class RenderAPIType
 {
@@ -121,6 +122,18 @@ public:
 
     // shadowmap 调试视图（Vulkan 后端实现；OpenGL 忽略）
     virtual void SetShadowDebugView(int mode) { (void)mode; }
+
+    // 鼠标拾取：返回 (x, y)（窗口坐标）处命中的可拾取 Model，未命中返回 nullptr。
+    //  - Vulkan 后端：渲染 id map 并读回像素 ID，反查对象；
+    //  - OpenGL 后端：默认未实现，返回 nullptr。
+    // 注意：读回的是“最近一帧已提交完成”的 id map（本帧渲染在 Present 中完成，
+    // 之后才能读到准确结果）。
+    virtual const Model *PickAt(int x, int y)
+    {
+        (void)x;
+        (void)y;
+        return nullptr;
+    }
 
     // 上传环境贴图数据（cubemap / irradiance / 预过滤 / BRDF LUT）。
     //  - Vulkan 后端：上传到 GPU 图像并更新描述符；

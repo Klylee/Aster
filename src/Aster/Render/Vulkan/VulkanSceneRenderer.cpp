@@ -206,8 +206,20 @@ void VulkanSceneRenderer::Shutdown()
 void VulkanSceneRenderer::BeginFrame()
 {
     drawCalls.clear();
+    pickCalls.clear();
     paramSlotCounter_ = 0;
     hasCustomParams_ = false;
+}
+
+// 拾取 ID 编码：把整数 ID 编码进 RGB（每通道 8bit），供 id.frag 输出到 id map。
+// 解码见 VulkanPipeline::ReadPickID（r | g<<8 | b<<16）。
+static glm::vec4 EncodePickID(int id)
+{
+    uint32_t u = (uint32_t)std::max(id, 0);
+    return glm::vec4((float)(u & 0xFFu) / 255.0f,
+                     (float)((u >> 8) & 0xFFu) / 255.0f,
+                     (float)((u >> 16) & 0xFFu) / 255.0f,
+                     1.0f);
 }
 
 void VulkanSceneRenderer::Submit(const VulkanMeshBuffer &mesh,
@@ -235,6 +247,79 @@ void VulkanSceneRenderer::Submit(const VulkanMeshBuffer &mesh,
     }
 
     drawCalls.push_back(dc);
+}
+
+// ---- 拾取 id map ----
+bool VulkanSceneRenderer::EnablePickMap(const std::string &shaderDir, uint32_t width, uint32_t height)
+{
+    if (!pipeline)
+        return false;
+    pickEnabled_ = pipeline->EnablePickMap(shaderDir, width, height);
+    if (pickEnabled_)
+        std::cout << "[VulkanSceneRenderer] Pick map enabled (" << width << "x" << height << ")" << std::endl;
+    return pickEnabled_;
+}
+
+void VulkanSceneRenderer::DestroyPickMap()
+{
+    pickCalls.clear();
+    pickEnabled_ = false;
+    if (pipeline)
+        pipeline->DestroyPickMap();
+}
+
+bool VulkanSceneRenderer::HasPickMap() const
+{
+    return pipeline && pipeline->HasPickMap();
+}
+
+void VulkanSceneRenderer::SubmitPick(const VulkanMeshBuffer &mesh, const glm::mat4 &model, int pickId)
+{
+    if (!pipeline || !pickEnabled_)
+        return;
+    if (pickId <= 0)
+        return; // 0 = 背景，不提交
+    pickCalls.push_back({&mesh, model, pickId});
+}
+
+void VulkanSceneRenderer::RecordPickMap(VkCommandBuffer cmd, const glm::mat4 &view, const glm::mat4 &proj)
+{
+    if (!pipeline || !pipeline->HasPickMap() || pickCalls.empty())
+        return;
+
+    // 相机 UBO 与主 pass 一致（同样的 y 翻转），保证 id map 与可视化对得上
+    pipeline->UpdateCameraUBO(view, VulkanYFlip(proj));
+
+    pipeline->BeginPickPass(cmd);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetPickPipeline());
+    VkDescriptorSet ds = pipeline->GetDescriptorSet();
+    const uint32_t dyn = 0; // 拾取管线不使用 binding 12，动态偏移给 0
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetLayout(),
+                            0, 1, &ds, 1, &dyn);
+
+    for (const auto &pcall : pickCalls)
+    {
+        MeshPushConstants pc{};
+        pc.model = pcall.model;
+        pc.color = EncodePickID(pcall.pickId); // id.frag 原样输出 → id map
+        pc.shadow = glm::vec4(0.0f);
+        pc.material = glm::vec4(0.0f);
+        vkCmdPushConstants(cmd, pipeline->GetLayout(),
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(pc), &pc);
+        pcall.mesh->Bind(cmd);
+        pcall.mesh->Draw(cmd);
+    }
+
+    pipeline->EndPickPass(cmd);
+    pipeline->CopyPickMapToBuffer(cmd); // 颜色图 → host-visible 读回缓冲
+}
+
+int VulkanSceneRenderer::PickAt(int x, int y) const
+{
+    if (!pipeline)
+        return 0;
+    return pipeline->ReadPickID(x, y);
 }
 
 int VulkanSceneRenderer::CreateMaterialPipeline(const std::string &shaderDir,

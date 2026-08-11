@@ -229,6 +229,31 @@ public:
     // 本帧内先 Allocate 槽位（见 VulkanSceneRenderer），Record 时按槽位绑定动态偏移。
     void UpdateMaterialParams(int slot, const float *data, int vec4Count);
 
+    // ---- 拾取 id map（离屏渲染 + 读回，用于鼠标拾取） ----
+    // 创建 id map：R8G8B8A8 离屏颜色图 + 专用深度图 + render pass +
+    // 拾取管线（mesh.vert + id.frag，输出 push constant color = 编码的拾取 ID）+
+    // host-visible 读回缓冲（width*height*4 字节）。
+    // 每帧在 Present 里：BeginPickPass 渲染可拾取对象 → EndPickPass →
+    // CopyPickMapToBuffer 拷到读回缓冲；随后（提交完成后）ReadPickID 解码像素 ID。
+    // width/height 一般取交换链尺寸（保证鼠标坐标 1:1 映射）。
+    bool EnablePickMap(const std::string &shaderDir, uint32_t width, uint32_t height);
+    void DestroyPickMap();
+    bool HasPickMap() const { return pickEnabled_; }
+
+    // 在命令缓冲中开启 / 结束拾取 render pass（会清颜色为 0=背景、清深度）
+    void BeginPickPass(VkCommandBuffer cmd);
+    void EndPickPass(VkCommandBuffer cmd);
+    // 把拾取图拷到读回缓冲（需在 EndPickPass 之后、同一命令缓冲内调用）
+    void CopyPickMapToBuffer(VkCommandBuffer cmd);
+
+    // 读回 (x, y) 处像素的拾取 ID（0 = 背景 / 未命中）。
+    // 必须在 CopyPickMapToBuffer 对应帧的 GPU 工作提交完成（fence 等待）后调用，
+    // 否则读到的可能是上一帧或未定义数据。
+    int ReadPickID(int x, int y) const;
+
+    VkPipeline GetPickPipeline() const { return pickPipeline; }
+    VkRenderPass GetPickRenderPass() const { return pickRenderPass; }
+
     // 天空盒：在主 render pass 内、绘制场景之前调用（深度写关闭，深度 = 1.0 远平面）。
     // invViewProj 由调用方用“仅旋转的 view”计算（天空盒位于无穷远）。
     void RecordSkybox(VkCommandBuffer cmd, const glm::mat4 &invViewProj,
@@ -353,6 +378,30 @@ private:
     VkBuffer materialParamsBuffer = VK_NULL_HANDLE;
     VkDeviceMemory materialParamsMemory = VK_NULL_HANDLE;
     void *materialParamsMapped = nullptr;
+
+    // ---- 拾取 id map 资源 ----
+    bool pickEnabled_ = false;
+    uint32_t pickWidth = 0, pickHeight = 0;
+    VkImage pickImage = VK_NULL_HANDLE;                 // R8G8B8A8（ID 编码颜色）
+    VkDeviceMemory pickImageMemory = VK_NULL_HANDLE;
+    VkImageView pickImageView = VK_NULL_HANDLE;
+    VkImage pickDepthImage = VK_NULL_HANDLE;            // 拾取专用深度图（与主深度分离）
+    VkDeviceMemory pickDepthMemory = VK_NULL_HANDLE;
+    VkImageView pickDepthView = VK_NULL_HANDLE;
+    VkRenderPass pickRenderPass = VK_NULL_HANDLE;
+    VkFramebuffer pickFramebuffer = VK_NULL_HANDLE;
+    VkPipeline pickPipeline = VK_NULL_HANDLE;           // mesh.vert + id.frag（输出 ID 颜色）
+    VkBuffer pickReadbackBuffer = VK_NULL_HANDLE;       // host-visible，w*h*4
+    VkDeviceMemory pickReadbackMemory = VK_NULL_HANDLE;
+    void *pickReadbackMapped = nullptr;
+
+    // 创建自定义管线（不加入 materialPipelines 列表，供主渲染与拾取复用）
+    // renderPass 指定管线兼容的 render pass（默认调用方传入）。
+    VkPipeline CreateMaterialPipelineImpl(const std::string &shaderDir,
+                                          const std::string &vertName,
+                                          const std::string &fragName,
+                                          VkRenderPass renderPass, bool enableBlend,
+                                          bool enableDepthWrite, float depthBias);
 
     // ---- M2：每对象材质纹理（binding 11，RGBA8） ----
     VkSampler materialSampler = VK_NULL_HANDLE;

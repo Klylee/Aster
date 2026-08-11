@@ -10,6 +10,7 @@ namespace aster
 class VulkanSceneRenderer;
 class VulkanMeshBuffer;
 class Mesh;
+class Model; // 拾取：PickAt 返回被拾取的 Model 指针
 
 // ============================================================================
 // VulkanRenderAPI —— Vulkan 后端
@@ -49,8 +50,14 @@ public:
     // 首次提交时会懒创建 Mesh 的 VulkanMeshBuffer；本帧在 Present() 中渲染。
     // params：每对象材质参数（颜色 / 粗糙度 / 金属度 / AO / 纹理索引 / 管线）。
     // castsShadow：该网格是否投影平面阴影（接收体如地面应传 false）。
+    // pickOwner：非空时该网格属于可拾取对象（Model::collectable），
+    //   会分配一个稳定拾取 ID 并画进离屏 id map（供 PickAt 反查）。
     void SubmitSceneMesh(const Mesh &mesh, const glm::mat4 &model, const MaterialParams &params,
-                         bool castsShadow = true);
+                         bool castsShadow = true, const Model *pickOwner = nullptr);
+
+    // 鼠标拾取：返回 (x, y)（窗口坐标）处命中的可拾取 Model，未命中返回 nullptr。
+    // 读回的是“最近一帧已提交完成”的 id map（本帧渲染在 Present 中完成，之后才准确）。
+    const Model *PickAt(int x, int y) override;
 
     // 设置场景相机；RenderScene 使用它而非演示用的环绕相机。
     void SetSceneCamera(const glm::mat4 &view, const glm::mat4 &proj) override;
@@ -123,6 +130,13 @@ private:
     VulkanSceneRenderer *sceneRenderer = nullptr;
     VulkanMeshBuffer *cubeMesh = nullptr;
 
+    // ---- 拾取注册表（Model* → 稳定拾取 ID；ID → Model*） ----
+    // ID 从 1 起，0 = 背景（未命中）；pickIdToModel_[0] 恒为 nullptr 占位。
+    std::unordered_map<const Model *, int> modelPickIds_;
+    std::vector<const Model *> pickIdToModel_;
+    // 为模型分配/获取稳定拾取 ID（首次出现时分配）
+    int GetOrAssignPickId(const Model *m);
+
     // ---- 场景渲染状态（Model 提交的网格 + 场景相机） ----
     glm::mat4 sceneView{1.0f};
     glm::mat4 sceneProj{1.0f};
@@ -172,6 +186,7 @@ private:
     bool CreateSceneRenderer();
     void DestroySceneRenderer();
     void RenderShadowMap(VkCommandBuffer cmd); // 阴影映射 pass（主 pass 之前）
+    void RenderPickMap(VkCommandBuffer cmd);   // 拾取 id map pass（主 pass 之前，阴影之后）
     void RenderScene(VkCommandBuffer cmd);
 
     static VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(

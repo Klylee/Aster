@@ -837,10 +837,10 @@ void VulkanRenderAPI::CreateTrianglePipeline()
     pipelineInfo.renderPass = renderPass;
     pipelineInfo.subpass = 0;
 
-    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &trianglePipeline) != VK_SUCCESS)
-    {
-        std::cerr << "[Vulkan] Failed to create triangle pipeline" << std::endl;
-    }
+    // if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &trianglePipeline) != VK_SUCCESS)
+    // {
+    //     std::cerr << "[Vulkan] Failed to create triangle pipeline" << std::endl;
+    // }
 
     vkDestroyShaderModule(device, vertModule, nullptr);
     vkDestroyShaderModule(device, fragModule, nullptr);
@@ -863,6 +863,10 @@ bool VulkanRenderAPI::CreateSceneRenderer()
         DestroySceneRenderer();
         return false;
     }
+
+    // 拾取 id map（尺寸 = 交换链，保证鼠标坐标 1:1 映射；失败仅提示、不影响主流程）
+    sceneRenderer->EnablePickMap(VULKAN_SHADER_DIR,
+                                 swapchainExtent.width, swapchainExtent.height);
 
     // // 24 顶点立方体（pos3 + nor3 + uv2，stride 32B），36 索引
     // const float cubeVertices[] = {
@@ -937,7 +941,8 @@ void VulkanRenderAPI::DestroySceneRenderer()
 }
 
 void VulkanRenderAPI::SubmitSceneMesh(const Mesh &mesh, const glm::mat4 &model,
-                                      const MaterialParams &params, bool castsShadow)
+                                      const MaterialParams &params, bool castsShadow,
+                                      const Model *pickOwner)
 {
     if (!sceneRenderer)
         return;
@@ -966,7 +971,51 @@ void VulkanRenderAPI::SubmitSceneMesh(const Mesh &mesh, const glm::mat4 &model,
     sceneRenderer->Submit(*mesh.vulkanBuffer, model, params.color, material,
                           castsShadow, params.pipelineIndex,
                           params.customUniforms, params.customUniformOrder);
+
+    // 拾取：可拾取对象（pickOwner 非空）画进离屏 id map（稳定 ID → 像素颜色）
+    if (pickOwner)
+    {
+        int pickId = GetOrAssignPickId(pickOwner);
+        sceneRenderer->SubmitPick(*mesh.vulkanBuffer, model, pickId);
+    }
+
     hasSceneMesh = true;
+}
+
+int VulkanRenderAPI::GetOrAssignPickId(const Model *m)
+{
+    auto it = modelPickIds_.find(m);
+    if (it != modelPickIds_.end())
+        return it->second;
+    int id = (int)pickIdToModel_.size(); // 0 = 背景占位
+    if (id == 0)
+    {
+        pickIdToModel_.push_back(nullptr); // index 0 = 背景
+        id = 1;
+    }
+    pickIdToModel_.push_back(m);
+    modelPickIds_[m] = id;
+    return id;
+}
+
+const Model *VulkanRenderAPI::PickAt(int x, int y)
+{
+    if (!sceneRenderer)
+        return nullptr;
+    // 窗口坐标 → 帧缓冲像素坐标（HiDPI / Retina 缩放）
+    int winW = 0, winH = 0;
+    glfwGetWindowSize(window, &winW, &winH);
+    int px = x;
+    int py = y;
+    if (winW > 0 && winH > 0)
+    {
+        px = (int)((double)x * (double)framebufferWidth / (double)winW);
+        py = (int)((double)y * (double)framebufferHeight / (double)winH);
+    }
+    int id = sceneRenderer->PickAt(px, py);
+    if (id > 0 && id < (int)pickIdToModel_.size())
+        return pickIdToModel_[id];
+    return nullptr;
 }
 
 void VulkanRenderAPI::SetSceneCamera(const glm::mat4 &view, const glm::mat4 &proj)
@@ -1035,6 +1084,14 @@ void VulkanRenderAPI::RenderShadowMap(VkCommandBuffer cmd)
 {
     if (sceneRenderer)
         sceneRenderer->RecordShadow(cmd);
+}
+
+void VulkanRenderAPI::RenderPickMap(VkCommandBuffer cmd)
+{
+    if (!sceneRenderer)
+        return;
+    // 拾取 id map：用当前场景相机渲染可拾取对象 + 拷贝到读回缓冲（主 pass 之前）
+    sceneRenderer->RecordPickMap(cmd, sceneView, sceneProj);
 }
 
 void VulkanRenderAPI::RenderScene(VkCommandBuffer cmd)
@@ -1228,6 +1285,10 @@ void VulkanRenderAPI::Present()
     // 否则会与主 pass 嵌套而崩溃。
     RenderShadowMap(cmd);
 
+    // 拾取 id map pass：在主 pass 之前渲染可拾取对象为 ID 颜色并拷贝到读回缓冲。
+    // （与阴影类似，是独立的离屏 render pass，不能与主 pass 嵌套。）
+    RenderPickMap(cmd);
+
     VkRenderPassBeginInfo rpInfo{};
     rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpInfo.renderPass = renderPass;
@@ -1255,24 +1316,24 @@ void VulkanRenderAPI::Present()
     // ---- 演示场景（旋转立方体：VulkanSceneRenderer 渲染） ----
     RenderScene(cmd);
 
-    // ---- 演示三角形（若着色器加载成功） ----
-    if (trianglePipeline != VK_NULL_HANDLE)
-    {
-        struct TrianglePushConstants
-        {
-            glm::vec3 color;
-            float time;
-        };
-        TrianglePushConstants pc;
-        pc.color = triangleColor;
-        pc.time = (float)frameCount * 0.02f;
+    // // ---- 演示三角形（若着色器加载成功） ----
+    // if (trianglePipeline != VK_NULL_HANDLE)
+    // {
+    //     struct TrianglePushConstants
+    //     {
+    //         glm::vec3 color;
+    //         float time;
+    //     };
+    //     TrianglePushConstants pc;
+    //     pc.color = triangleColor;
+    //     pc.time = (float)frameCount * 0.02f;
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglePipeline);
-        vkCmdPushConstants(cmd, trianglePipelineLayout,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(pc), &pc);
-        vkCmdDraw(cmd, 3, 1, 0, 0);
-    }
+    //     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglePipeline);
+    //     vkCmdPushConstants(cmd, trianglePipelineLayout,
+    //                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+    //                        0, sizeof(pc), &pc);
+    //     vkCmdDraw(cmd, 3, 1, 0, 0);
+    // }
 
     // ---- ImGui ----
     if (ImGui::GetDrawData())
@@ -1308,6 +1369,11 @@ void VulkanRenderAPI::Present()
         std::cerr << "[Vulkan] Failed to submit draw command buffer" << std::endl;
         return;
     }
+
+    // 拾取 id map 读回：等待本帧提交完成，保证拾取读回缓冲已被 GPU 写入。
+    // （代价是每帧 GPU 同步；demo 场景轻量，可接受。若去掉则 PickAt 可能读到
+    //   上一帧/未定义数据。）
+    vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
     // ---- 呈现 ----
     VkPresentInfoKHR presentInfo{};
@@ -1449,6 +1515,14 @@ void VulkanRenderAPI::RecreateSwapchain(int width, int height)
 
     imagesInFlight.assign(swapchainImages.size(), VK_NULL_HANDLE);
 
+    // 拾取 id map 尺寸随交换链变化（保证鼠标坐标 1:1），重建
+    if (sceneRenderer)
+    {
+        sceneRenderer->DestroyPickMap();
+        sceneRenderer->EnablePickMap(VULKAN_SHADER_DIR,
+                                     swapchainExtent.width, swapchainExtent.height);
+    }
+
     // 通知 ImGui 交换链图像数变化
     ImGui_ImplVulkan_SetMinImageCount((uint32_t)swapchainImages.size());
 
@@ -1500,11 +1574,11 @@ void VulkanRenderAPI::Shutdown()
 
     CleanupSwapchain();
 
-    if (trianglePipeline)
-    {
-        vkDestroyPipeline(device, trianglePipeline, nullptr);
-        trianglePipeline = VK_NULL_HANDLE;
-    }
+    // if (trianglePipeline)
+    // {
+    //     vkDestroyPipeline(device, trianglePipeline, nullptr);
+    //     trianglePipeline = VK_NULL_HANDLE;
+    // }
     if (trianglePipelineLayout)
     {
         vkDestroyPipelineLayout(device, trianglePipelineLayout, nullptr);

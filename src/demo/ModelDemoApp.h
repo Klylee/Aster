@@ -71,6 +71,10 @@ private:
     bool softShadow = true;      // 软阴影开关（ImGui 按钮切换）
     int shadowDebugView = 0;     // shadowmap 调试视图（0=正常，1=2D，2=点光源 cubemap）
 
+    // ---- 鼠标拾取（id map）----
+    const Model *pickedModel = nullptr; // 最近一次左键点击命中的可拾取对象
+    bool prevLeftDown_ = false;         // 上一帧左键状态（边沿检测，避免按住时每帧触发）
+
     // ---- 环境贴图（HDR IBL）控制 ----
     std::shared_ptr<EnvironmentMap> environmentMap; // 加载自 assets/HDRIs/*.exr
     int envMode = 3;             // 0=关闭, 1=反射, 2=漫反射 IBL, 3=漫反射+高光 IBL

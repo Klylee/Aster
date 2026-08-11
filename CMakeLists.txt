@@ -68,6 +68,7 @@ if(ASTER_VULKAN_AVAILABLE)
             toon.frag
             grid.vert
             grid.frag
+            id.frag
         )
         set(VULKAN_SPV_OUTPUTS "")
         foreach(SHADER ${VULKAN_SHADERS})

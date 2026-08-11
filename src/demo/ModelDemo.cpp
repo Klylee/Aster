@@ -23,6 +23,7 @@
 #include "Aster/Core/Path.h"
 #include "Aster/Lighting/Light.h"
 #include "Aster/Core/GlobalTime.h"
+#include "Aster/Core/Input.h"
 #include "Aster/Scene/SceneManager.h"
 #ifdef ASTER_ENABLE_VULKAN
 #include "Aster/Render/Vulkan/VulkanRenderAPI.h"
@@ -254,6 +255,7 @@ bool ModelDemoApp::InitScene()
             gridModel = std::make_shared<Model>();
             gridModel->objName = "ground_grid";
             gridModel->castsShadow = false; // 自定义管线不进阴影 pass
+            gridModel->collectable = true;  // 拾取：加入 id map
             gridModel->meshes.push_back(gridMesh);
             gridModel->material = gridMaterial;
             gridModel->transform.SetPosition(Vec3(0.0f, 0.02f, 0.0f)); // 略高于地面防 z-fight
@@ -287,6 +289,7 @@ bool ModelDemoApp::InitScene()
     model = std::make_shared<Model>();
     model->objName = "icosphere";
     model->castsShadow = true;
+    model->collectable = true; // 拾取：加入 id map
     model->meshes.push_back(mesh);
     material = registerMaterial("sphere", glm::vec4(1.0f, 0.62f, 0.25f, 1.0f));
     model->material = material;
@@ -339,6 +342,7 @@ bool ModelDemoApp::InitScene()
     secondModel = std::make_shared<Model>();
     secondModel->objName = "sphereB";
     secondModel->castsShadow = true;
+    secondModel->collectable = true; // 拾取：加入 id map
     secondModel->meshes.push_back(mesh); // 复用同一 icosphere 网格（Mesh 复用）
     secondModel->material = material2;
     secondModel->transform.SetPosition(Vec3(7.0f, 2.0f, 0.0f));
@@ -487,6 +491,21 @@ void ModelDemoApp::Update()
             glm::angleAxis(rotationTime * -0.5f, glm::vec3(0.0f, 1.0f, 0.0f)) *
             glm::angleAxis(rotationTime * 0.3f, glm::vec3(1.0f, 0.0f, 0.0f)));
     }
+
+    // ---- 鼠标拾取（id map）：左键按下沿（未被 ImGui 捕获）→ 读回命中对象 ----
+    // 注意：PickAt 读的是“上一帧已提交完成”的 id map（本帧 id map 在 Present 中才渲染）。
+    bool leftDown = Input::isMouseButtonPressed(GLFW_MOUSE_BUTTON_LEFT);
+    bool clicked = leftDown && !prevLeftDown_ && !Input::isMouseCapturedByImGui();
+    prevLeftDown_ = leftDown;
+    if (clicked && renderAPI && renderAPI->IsVulkan())
+    {
+        auto [mx, my] = Input::getMousePosition();
+        pickedModel = renderAPI->PickAt((int)mx, (int)my);
+        if (pickedModel)
+            std::cout << "[Pick] clicked -> " << pickedModel->objName << std::endl;
+        else
+            std::cout << "[Pick] clicked -> (none)" << std::endl;
+    }
 }
 
 void ModelDemoApp::RenderImGui()
@@ -511,7 +530,7 @@ void ModelDemoApp::RenderImGui()
                           m->baseName.empty() ? "" : (" <- " + m->baseName).c_str(),
                           m->roughness, m->metallic, m->color.r, m->color.g, m->color.b);
     }
-    ImGui::TextWrapped("'sphere_blue' 是 'sphere' 的实例：共享同一 shader，颜色/粗糙度独立。");
+    // ImGui::TextWrapped("'sphere_blue' 是 'sphere' 的实例：共享同一 shader，颜色/粗糙度独立。");s
 
     ImGui::Separator();
     ImGui::ColorEdit4("Material color", glm::value_ptr(material->color));
@@ -581,6 +600,18 @@ void ModelDemoApp::RenderImGui()
     {
         ImGui::TextWrapped("(Only available on the Vulkan backend with the grid pipeline.)");
     }
+
+    // ---- 鼠标拾取（id map）----
+    ImGui::Separator();
+    ImGui::Text("Picking (id map, Vulkan)");
+    ImGui::TextWrapped("Left-click a collectable object (spheres / grid). "
+                       "Collectable objects are rendered to an offscreen id map, "
+                       "the pixel id is read back to find the clicked object.");
+    if (pickedModel)
+        ImGui::Text("Picked: %s", pickedModel->objName.c_str());
+    else
+        ImGui::Text("Picked: (none)");
+    ImGui::TextWrapped("Model::collectable = true 加入可拾取列表；PickAt 返回命中的 Model。");
 
     // ---- 环境贴图（HDR IBL）控制 ----
     ImGui::Separator();

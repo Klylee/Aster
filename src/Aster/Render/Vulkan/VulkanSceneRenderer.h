@@ -113,6 +113,25 @@ public:
     // 环境贴图是否已上传（有真实数据，天空盒 + IBL 可用）
     bool HasEnvironment() const;
 
+    // ---- 拾取 id map（鼠标拾取） ----
+    // 创建拾取 id map（离屏颜色图 + 读回缓冲 + 拾取管线）。宽高一般取交换链尺寸。
+    // 之后每帧：SubmitPick 提交可拾取对象 → RecordPickMap（主 pass 前）渲染 + 拷贝读回 →
+    // 提交完成后 PickAt 读回像素 ID。
+    bool EnablePickMap(const std::string &shaderDir, uint32_t width, uint32_t height);
+    void DestroyPickMap();
+    bool HasPickMap() const;
+
+    // 提交一个可拾取对象（mesh + 模型矩阵 + 拾取 ID）。每帧在 BeginFrame 后调用。
+    void SubmitPick(const VulkanMeshBuffer &mesh, const glm::mat4 &model, int pickId);
+
+    // 录制拾取 pass（渲染可拾取对象为 ID 颜色）+ 拷贝到读回缓冲。
+    // 必须在主 render pass 之前调用（Present 中先于主 pass）。
+    void RecordPickMap(VkCommandBuffer cmd, const glm::mat4 &view, const glm::mat4 &proj);
+
+    // 读回 (x, y) 像素处的拾取 ID（0 = 背景 / 未命中）。
+    // 需在 RecordPickMap 对应帧的 GPU 工作提交完成（fence 等待）后调用。
+    int PickAt(int x, int y) const;
+
     bool IsReady() const { return pipeline != nullptr; }
 
 private:
@@ -130,6 +149,16 @@ private:
     VkDevice device = VK_NULL_HANDLE;
     VulkanPipeline *pipeline = nullptr;
     std::vector<DrawCall> drawCalls;
+
+    // ---- 拾取 id map ----
+    struct PickCall
+    {
+        const VulkanMeshBuffer *mesh = nullptr;
+        glm::mat4 model;
+        int pickId = 0; // 0 = 背景（未命中）
+    };
+    std::vector<PickCall> pickCalls; // 本帧可拾取对象（BeginFrame 清空）
+    bool pickEnabled_ = false;       // id map 是否可用
 
     // M4：自定义材质参数动态 UBO 状态
     int paramSlotCounter_ = 0;   // 本帧已分配的槽位计数（BeginFrame 重置）

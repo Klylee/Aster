@@ -155,7 +155,9 @@ void Model::draw()
         }
         glm::mat4 modelMat = transform.GetLocalToWorld();
         for (const auto &mesh : meshes)
-            vk->SubmitSceneMesh(*mesh, modelMat, mp, castsShadow);
+            // collectable：该对象画进离屏 id map，供鼠标拾取（PickAt）
+            vk->SubmitSceneMesh(*mesh, modelMat, mp, castsShadow,
+                                collectable ? this : nullptr);
         return;
     }
 #endif
