@@ -2,6 +2,7 @@
 #include "VulkanUtil.h"
 
 #include <array>
+#include <algorithm>
 #include <cstring>
 #include <functional>
 #include <iostream>
@@ -92,7 +93,8 @@ bool VulkanPipeline::Create(VkDevice device, VkPhysicalDevice physicalDevice,
     //   binding 9  = BRDF LUT（片元阶段）
     //   binding 10 = 环境 UBO（强度/模式/材质/相机，片元阶段）
     //   binding 11 = 每对象材质纹理数组（M2，片元阶段）
-    VkDescriptorSetLayoutBinding layoutBindings[12]{};
+    //   binding 12 = 自定义材质参数动态 UBO（M4，顶点+片元阶段）
+    VkDescriptorSetLayoutBinding layoutBindings[13]{};
     layoutBindings[0].binding = 0;
     layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     layoutBindings[0].descriptorCount = 1;
@@ -141,10 +143,15 @@ bool VulkanPipeline::Create(VkDevice device, VkPhysicalDevice physicalDevice,
     layoutBindings[11].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     layoutBindings[11].descriptorCount = MAX_MATERIAL_TEXTURES;
     layoutBindings[11].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // M4：自定义材质参数（动态 UBO，per-object 通过 dynamicOffset 切换槽位）
+    layoutBindings[12].binding = 12;
+    layoutBindings[12].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    layoutBindings[12].descriptorCount = 1;
+    layoutBindings[12].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutCreateInfo setLayoutInfo{};
     setLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    setLayoutInfo.bindingCount = 12;
+    setLayoutInfo.bindingCount = 13;
     setLayoutInfo.pBindings = layoutBindings;
     if (vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS)
     {
@@ -210,21 +217,33 @@ bool VulkanPipeline::Create(VkDevice device, VkPhysicalDevice physicalDevice,
         Destroy();
         return false;
     }
+    // M4：自定义材质参数动态 UBO（binding 12，按槽位切分，供 per-object dynamicOffset）
+    if (!CreateUbo(device, physicalDevice,
+                   MATERIAL_PARAMS_SLOTS * MATERIAL_PARAMS_STRIDE,
+                   materialParamsBuffer, materialParamsMemory, materialParamsMapped))
+    {
+        std::cerr << "[VulkanPipeline] Failed to create material params buffer" << std::endl;
+        Destroy();
+        return false;
+    }
 
     // ---- 描述符池 + 描述符集 ----
-    // 每个描述符集含 5 个 UBO（相机/灯光/阴影/点阴影/环境）与 6 个 CIS（2D 阴影数组 +
-    // 点阴影 cubemap + 环境 cubemap + irradiance + 预过滤 + BRDF LUT）+ 材质纹理数组；
-    // 主集 + 阴影集共 2 套。容量按 2 套计，保证分配不超。
-    VkDescriptorPoolSize poolSizes[2]{};
+    // 每个描述符集含 5 个 UBO（相机/灯光/阴影/点阴影/环境）+ 1 个动态 UBO（binding 12，
+    // 自定义材质参数）与 6 个 CIS（2D 阴影数组 + 点阴影 cubemap + 环境 cubemap +
+    // irradiance + 预过滤 + BRDF LUT）+ 材质纹理数组；主集 + 阴影集共 2 套。
+    // 容量按 2 套计，保证分配不超。
+    VkDescriptorPoolSize poolSizes[3]{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = 5 * 2; // 主集 + 阴影集各 5 个 UBO
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[1].descriptorCount = (MAX_2D_SHADOW_MAPS + 1 + 4 + MAX_MATERIAL_TEXTURES) * 2; // 主/阴影各一份
+    poolSizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    poolSizes[2].descriptorCount = 1 * 2; // 主集 + 阴影集各 1 个动态 UBO（binding 12）
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.maxSets = 2; // 主描述符集 + 阴影深度 pass 描述符集
-    poolInfo.poolSizeCount = 2;
+    poolInfo.poolSizeCount = 3;
     poolInfo.pPoolSizes = poolSizes;
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS)
     {
@@ -252,9 +271,10 @@ bool VulkanPipeline::Create(VkDevice device, VkPhysicalDevice physicalDevice,
         return false;
     }
 
-    // 每套描述符集 5 个 UBO：binding 0(相机)/1(灯光)/3(阴影)/5(点阴影)/10(环境)
-    VkDescriptorBufferInfo bufferInfos[10]{};
-    // 主描述符集
+    // 每套描述符集 6 个缓冲绑定：binding 0(相机)/1(灯光)/3(阴影)/5(点阴影)/10(环境) +
+    // binding 12(自定义材质参数，动态 UBO)
+    VkDescriptorBufferInfo bufferInfos[12]{};
+    // 主描述符集（6 项：0..5）
     bufferInfos[0].buffer = uboBuffer;
     bufferInfos[0].offset = 0;
     bufferInfos[0].range = sizeof(CameraUBO);
@@ -270,40 +290,48 @@ bool VulkanPipeline::Create(VkDevice device, VkPhysicalDevice physicalDevice,
     bufferInfos[4].buffer = envUboBuffer;
     bufferInfos[4].offset = 0;
     bufferInfos[4].range = sizeof(EnvUBO);
-    // 阴影深度 pass 描述符集：binding 0 = 灯光视角相机 UBO，其余共享
-    bufferInfos[5].buffer = shadowCamBuffer;
+    bufferInfos[5].buffer = materialParamsBuffer; // binding 12 动态 UBO（槽 0 = 无自定义参数）
     bufferInfos[5].offset = 0;
-    bufferInfos[5].range = sizeof(CameraUBO);
-    bufferInfos[6].buffer = lightsBuffer;
+    bufferInfos[5].range = MATERIAL_PARAMS_STRIDE;
+    // 阴影深度 pass 描述符集（6 项：6..11）；binding 0 = 灯光视角相机 UBO，其余共享
+    bufferInfos[6].buffer = shadowCamBuffer;
     bufferInfos[6].offset = 0;
-    bufferInfos[6].range = sizeof(LightUBO);
-    bufferInfos[7].buffer = shadowUboBuffer;
+    bufferInfos[6].range = sizeof(CameraUBO);
+    bufferInfos[7].buffer = lightsBuffer;
     bufferInfos[7].offset = 0;
-    bufferInfos[7].range = sizeof(ShadowUBO);
-    bufferInfos[8].buffer = pointShadowUboBuffer;
+    bufferInfos[7].range = sizeof(LightUBO);
+    bufferInfos[8].buffer = shadowUboBuffer;
     bufferInfos[8].offset = 0;
-    bufferInfos[8].range = sizeof(PointShadowUBO);
-    bufferInfos[9].buffer = envUboBuffer;
+    bufferInfos[8].range = sizeof(ShadowUBO);
+    bufferInfos[9].buffer = pointShadowUboBuffer;
     bufferInfos[9].offset = 0;
-    bufferInfos[9].range = sizeof(EnvUBO);
+    bufferInfos[9].range = sizeof(PointShadowUBO);
+    bufferInfos[10].buffer = envUboBuffer;
+    bufferInfos[10].offset = 0;
+    bufferInfos[10].range = sizeof(EnvUBO);
+    bufferInfos[11].buffer = materialParamsBuffer; // binding 12 动态 UBO
+    bufferInfos[11].offset = 0;
+    bufferInfos[11].range = MATERIAL_PARAMS_STRIDE;
 
-    VkWriteDescriptorSet writes[10]{};
+    VkWriteDescriptorSet writes[12]{};
+    const int dstBindings[6] = {0, 1, 3, 5, 10, 12};
     for (int s = 0; s < 2; ++s)
     {
-        const VkDescriptorBufferInfo *bi = &bufferInfos[s * 5];
-        const int dstBindings[5] = {0, 1, 3, 5, 10};
-        for (int w = 0; w < 5; ++w)
+        const VkDescriptorBufferInfo *bi = &bufferInfos[s * 6];
+        for (int w = 0; w < 6; ++w)
         {
-            writes[s * 5 + w].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[s * 5 + w].dstSet = (s == 0) ? descriptorSet : shadowDescriptorSet;
-            writes[s * 5 + w].dstBinding = dstBindings[w];
-            writes[s * 5 + w].dstArrayElement = 0;
-            writes[s * 5 + w].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            writes[s * 5 + w].descriptorCount = 1;
-            writes[s * 5 + w].pBufferInfo = &bi[w];
+            writes[s * 6 + w].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[s * 6 + w].dstSet = (s == 0) ? descriptorSet : shadowDescriptorSet;
+            writes[s * 6 + w].dstBinding = dstBindings[w];
+            writes[s * 6 + w].dstArrayElement = 0;
+            writes[s * 6 + w].descriptorType =
+                (dstBindings[w] == 12) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+                                       : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            writes[s * 6 + w].descriptorCount = 1;
+            writes[s * 6 + w].pBufferInfo = &bi[w];
         }
     }
-    vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
+    vkUpdateDescriptorSets(device, 12, writes, 0, nullptr);
 
     // ---- 图形管线 ----
     VkPipelineShaderStageCreateInfo stages[2]{};
@@ -620,6 +648,22 @@ void VulkanPipeline::Destroy()
     {
         vkDestroyBuffer(device, envUboBuffer, nullptr);
         envUboBuffer = VK_NULL_HANDLE;
+    }
+    // M4：自定义材质参数动态 UBO（binding 12）
+    if (materialParamsMapped)
+    {
+        vkUnmapMemory(device, materialParamsMemory);
+        materialParamsMapped = nullptr;
+    }
+    if (materialParamsMemory)
+    {
+        vkFreeMemory(device, materialParamsMemory, nullptr);
+        materialParamsMemory = VK_NULL_HANDLE;
+    }
+    if (materialParamsBuffer)
+    {
+        vkDestroyBuffer(device, materialParamsBuffer, nullptr);
+        materialParamsBuffer = VK_NULL_HANDLE;
     }
     if (skyboxPipeline)
     {
@@ -1482,11 +1526,27 @@ void VulkanPipeline::EndPointShadowPass(VkCommandBuffer cmd, int face)
                          0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
-void VulkanPipeline::Bind(VkCommandBuffer cmd) const
+void VulkanPipeline::Bind(VkCommandBuffer cmd, uint32_t dynamicOffset) const
 {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    // 布局含 binding 12 动态 UBO：每次绑定都必须提供 dynamicOffset（可为 0）
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout,
-                            0, 1, &descriptorSet, 0, nullptr);
+                            0, 1, &descriptorSet, 1, &dynamicOffset);
+}
+
+void VulkanPipeline::UpdateMaterialParams(int slot, const float *data, int vec4Count)
+{
+    if (!materialParamsMapped)
+        return;
+    if (slot < 0 || slot >= MATERIAL_PARAMS_SLOTS)
+        return;
+    int count = std::min(vec4Count, MATERIAL_PARAMS_VEC4);
+    if (count < 0)
+        count = 0;
+    void *dst = (char *)materialParamsMapped + (size_t)slot * (size_t)MATERIAL_PARAMS_STRIDE;
+    std::memset(dst, 0, MATERIAL_PARAMS_STRIDE);
+    if (count > 0 && data)
+        std::memcpy(dst, data, (size_t)count * 16u);
 }
 
 // ============================================================================
@@ -2545,8 +2605,10 @@ void VulkanPipeline::RecordSkybox(VkCommandBuffer cmd, const glm::mat4 &invViewP
     pc.yaw = glm::vec4(yaw, exposure, 0.0f, 0.0f);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
+    // 布局含 binding 12 动态 UBO：必须提供 dynamicOffset（天空盒不使用该绑定，给 0）
+    const uint32_t skyDyn = 0;
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout,
-                            0, 1, &descriptorSet, 0, nullptr);
+                            0, 1, &descriptorSet, 1, &skyDyn);
     vkCmdPushConstants(cmd, layout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(pc), &pc);

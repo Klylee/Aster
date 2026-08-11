@@ -210,6 +210,15 @@ bool ModelDemoApp::InitScene()
         toonPipeline = vk->CreateMaterialPipeline("toon.vert", "toon.frag");
         if (toonPipeline > 0)
             groundMaterial->vulkanPipeline = toonPipeline;
+
+        // M4：自定义材质 uniform（OpenGL 风格 SetUniform(key,type,value)）。
+        // 注册顺序 = toon.frag 中 MaterialParams.params[i] 的约定顺序：
+        //   params[0].x=bandThresh / params[1].x=specPow / params[2].x=rimStrength /
+        //   params[3].rgb=toonTint。Vulkan 后端打包到 binding 12 动态 UBO。
+        groundMaterial->SetUniform("bandThresh", "float", toonBandThresh);
+        groundMaterial->SetUniform("specPow", "float", toonSpecPow);
+        groundMaterial->SetUniform("rimStrength", "float", toonRim);
+        groundMaterial->SetUniform("toonTint", "vec3f", toonTint);
     }
 #endif
 
@@ -380,6 +389,17 @@ void ModelDemoApp::Update()
                 material->ao = envAO;
             }
 
+            // M4：Vulkan 后端每帧同步地面（toon）材质的自定义 uniform，
+            // 滑块改动立即生效（打包到 binding 12 动态 UBO）。
+            // 注：OpenGL 后端的地面用 env_ibl shader，不含这些参数，故跳过。
+            if (renderAPI->IsVulkan() && groundMaterial && toonPipeline > 0)
+            {
+                groundMaterial->SetUniform("bandThresh", "float", toonBandThresh);
+                groundMaterial->SetUniform("specPow", "float", toonSpecPow);
+                groundMaterial->SetUniform("rimStrength", "float", toonRim);
+                groundMaterial->SetUniform("toonTint", "vec3f", toonTint);
+            }
+
             // OpenGL 后端：环境参数经材质 uniform 传给场景着色器（env_ibl.shader）
             if (renderAPI->IsOpenGL())
             {
@@ -468,6 +488,26 @@ void ModelDemoApp::RenderImGui()
     if (shadowDebugView != prevDebug && renderAPI)
         renderAPI->SetShadowDebugView(shadowDebugView);
     ImGui::TextWrapped("Visualize shadow map depth (blue=near, red=far).");
+
+    // ---- M4：自定义材质 uniform（toon 地面）控制 ----
+    // 通过 Material::SetUniform(key,type,value) 设置，Vulkan 打包到 binding 12 动态 UBO。
+    ImGui::Separator();
+    ImGui::Text("Custom Material Params (Vulkan, toon ground)");
+    ImGui::TextWrapped("Set via Material::SetUniform(key, type, value); packed in "
+                       "registration order into uMatParams.params[i] (binding 12).");
+    if (renderAPI && renderAPI->IsVulkan() && toonPipeline > 0)
+    {
+        ImGui::SliderFloat("Toon Band Thresh", &toonBandThresh, 0.2f, 0.95f, "%.2f");
+        ImGui::SliderFloat("Toon Spec Power", &toonSpecPow, 1.0f, 128.0f, "%.0f");
+        ImGui::SliderFloat("Toon Rim Strength", &toonRim, 0.0f, 1.0f, "%.2f");
+        ImGui::ColorEdit3("Toon Tint", glm::value_ptr(toonTint));
+        ImGui::TextWrapped("params[0]=bandThresh, [1]=specPow, [2]=rim, [3]=tint. "
+                           "Changes apply every frame.");
+    }
+    else
+    {
+        ImGui::TextWrapped("(Only available on the Vulkan backend with the toon pipeline.)");
+    }
 
     // ---- 环境贴图（HDR IBL）控制 ----
     ImGui::Separator();

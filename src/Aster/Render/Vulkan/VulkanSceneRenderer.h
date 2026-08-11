@@ -2,6 +2,8 @@
 
 #include <string>
 #include <vector>
+#include <unordered_map>
+#include <any>
 
 #include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
@@ -48,8 +50,12 @@ public:
     void BeginFrame();
     // material = (粗糙度, 金属度, AO, 纹理索引)；-1 纹理 = 无纹理
     // pipelineIndex：0 = 默认 mesh 管线；>=1 = CreateMaterialPipeline 返回的自定义管线
+    // customUniforms/customUniformOrder（M4）：自定义材质参数（OpenGL 风格
+    // SetUniform(key,type,value)），打包到 binding 12 动态 UBO；可传 nullptr = 无。
     void Submit(const VulkanMeshBuffer &mesh, const glm::mat4 &model, const glm::vec4 &color,
-                const glm::vec4 &material, bool castsShadow = true, int pipelineIndex = 0);
+                const glm::vec4 &material, bool castsShadow = true, int pipelineIndex = 0,
+                const std::unordered_map<std::string, std::pair<std::string, std::any>> *customUniforms = nullptr,
+                const std::vector<std::string> *customUniformOrder = nullptr);
     // 录制阴影映射 pass（必须在主 render pass 开始前调用，Present 中先于主 pass）
     void RecordShadow(VkCommandBuffer cmd);
     void Record(VkCommandBuffer cmd, const glm::mat4 &view, const glm::mat4 &proj);
@@ -114,11 +120,16 @@ private:
         glm::vec4 material;   // (粗糙度, 金属度, AO, 纹理索引)
         bool castsShadow = true;
         int pipelineIndex = 0; // 0=默认 mesh 管线，>=1=自定义管线
+        int paramSlot = 0;     // M4：binding 12 动态 UBO 槽位（0 = 无自定义参数）
     };
 
     VkDevice device = VK_NULL_HANDLE;
     VulkanPipeline *pipeline = nullptr;
     std::vector<DrawCall> drawCalls;
+
+    // M4：自定义材质参数动态 UBO 状态
+    int paramSlotCounter_ = 0;   // 本帧已分配的槽位计数（BeginFrame 重置）
+    bool hasCustomParams_ = false; // 本帧是否有绘制带自定义参数（决定是否 per-draw 绑定）
 
     LightUBO lights_{};
     bool hasLights_ = false;

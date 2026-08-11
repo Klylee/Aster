@@ -71,8 +71,10 @@ public:
     // 更新灯光 UBO（片元着色器使用）
     void UpdateLightsUBO(const LightUBO &lights);
 
-    // 在命令缓冲中绑定管线与相机描述集
-    void Bind(VkCommandBuffer cmd) const;
+    // 在命令缓冲中绑定管线与相机描述集。
+    // dynamicOffset：binding 12 动态 UBO 的字节偏移（每对象自定义材质参数）。
+    // 布局含动态绑定（binding 12），每次绑定都必须提供 dynamicOffset（可为 0）。
+    void Bind(VkCommandBuffer cmd, uint32_t dynamicOffset = 0) const;
 
     // 阴影深度 pass 使用的描述符集（binding 0 = 阴影专用相机 UBO，其余与主描述符集相同）
     VkDescriptorSet GetShadowDescriptorSet() const { return shadowDescriptorSet; }
@@ -199,6 +201,28 @@ public:
     // 已注册材质纹理数量（含索引 0 的白色占位）
     int GetMaterialTextureCount() const { return (int)materialImageViews.size(); }
 
+    // ---- M4：自定义材质 uniform（binding 12 动态 UBO） ----
+    // 每个材质至多 8 个 vec4（128 字节）的自定义参数（OpenGL 风格 SetUniform(key,type,value)）。
+    // 打包规则（std140，每个 uniform 占 1 个 vec4，mat4 占 4 个）：
+    //   float/int/uint → params[i].x
+    //   vec3f/vec3i    → params[i].xyz
+    //   vec4f/vec4i    → params[i].xyzw
+    //   mat4           → params[i..i+3]（列主序）
+    // 自定义 shader 用 `layout(std140, set=0, binding=12) uniform MaterialParams { vec4 params[8]; } uMatParams;`
+    // 访问，params 下标与 CPU 端 SetUniform 的注册顺序一一对应。
+    static constexpr int MATERIAL_PARAMS_VEC4 = 8;         // 每材质最多 8 个 vec4（shader 可见 128B）
+    static constexpr int MATERIAL_PARAMS_SLOTS = 512;      // 本帧最多带自定义参数的绘制数
+    // 槽位字节步长：Vulkan 要求动态 UBO 的 dynamicOffset 为 minUniformBufferOffsetAlignment
+    // 的倍数（规范保证所有实现 ≤ 256），故用 256B/槽。shader 仅读取前 8 个 vec4，余量补齐对齐。
+    static constexpr VkDeviceSize MATERIAL_PARAMS_STRIDE = 256;
+
+    // 动态 UBO 每个槽位的字节数（256）—— vkCmdBindDescriptorSets 的 dynamicOffset 步长
+    VkDeviceSize GetMaterialParamsStride() const { return MATERIAL_PARAMS_STRIDE; }
+
+    // 把第 slot 个槽位的内容写为 data（vec4 数量，<= MATERIAL_PARAMS_VEC4，不足补零）。
+    // 本帧内先 Allocate 槽位（见 VulkanSceneRenderer），Record 时按槽位绑定动态偏移。
+    void UpdateMaterialParams(int slot, const float *data, int vec4Count);
+
     // 天空盒：在主 render pass 内、绘制场景之前调用（深度写关闭，深度 = 1.0 远平面）。
     // invViewProj 由调用方用“仅旋转的 view”计算（天空盒位于无穷远）。
     void RecordSkybox(VkCommandBuffer cmd, const glm::mat4 &invViewProj,
@@ -316,6 +340,13 @@ private:
 
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+
+    // ---- M4：自定义材质参数动态 UBO（binding 12） ----
+    // 单个 host-visible 缓冲，按槽位（MATERIAL_PARAMS_STRIDE=128B）切分；
+    // 每帧由场景渲染器分配槽位并写入，Record 时以 dynamicOffset 绑定。
+    VkBuffer materialParamsBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory materialParamsMemory = VK_NULL_HANDLE;
+    void *materialParamsMapped = nullptr;
 
     // ---- M2：每对象材质纹理（binding 11，RGBA8） ----
     VkSampler materialSampler = VK_NULL_HANDLE;

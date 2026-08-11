@@ -19,18 +19,25 @@
 // ============================================================================
 
 #include <string>
+#include <unordered_map>
+#include <any>
+#include <vector>
 #include <glm/glm.hpp>
 #include "LightData.h"      // LightUBO：灯光数据（无 GL 依赖）
 #include "EnvironmentMap.h" // 环境贴图资源（无 GL/Vulkan 依赖）
 
 // ============================================================================
 // 每对象材质参数（Vulkan 场景渲染用）
-//   color         —— 基础色 / 反照率（push constant）
-//   roughness     —— 粗糙度（高光 IBL / 高光分布）
-//   metallic      —— 金属度
-//   ao            —— 环境光遮蔽
-//   textureIndex  —— M2：材质纹理索引（-1 = 无纹理）
-//   pipelineIndex —— M3：自定义 shader 管线索引（0 = 默认 mesh 管线）
+//   color           —— 基础色 / 反照率（push constant）
+//   roughness       —— 粗糙度（高光 IBL / 高光分布）
+//   metallic        —— 金属度
+//   ao              —— 环境光遮蔽
+//   textureIndex    —— M2：材质纹理索引（-1 = 无纹理）
+//   pipelineIndex   —— M3：自定义 shader 管线索引（0 = 默认 mesh 管线）
+//   customUniforms  —— M4：自定义 uniform（OpenGL 风格 SetUniform(key,type,value)）。
+//                      Vulkan 后端打包到每对象动态 UBO（set0 binding12，std140）；
+//                      OpenGL 后端忽略（Material::ApplyUniforms 自行处理）。
+//                      指针指向 Material 的 uniform map / 注册顺序，仅本帧有效。
 // ============================================================================
 struct MaterialParams
 {
@@ -40,6 +47,11 @@ struct MaterialParams
     float ao = 1.0f;
     int textureIndex = -1;
     int pipelineIndex = 0;
+
+    // M4：自定义 uniform（指针，默认 null = 无自定义参数）。
+    // customUniformOrder 为 SetUniform 的注册顺序（Vulkan 打包顺序，可与 shader 字段一一对应）。
+    const std::unordered_map<std::string, std::pair<std::string, std::any>> *customUniforms = nullptr;
+    const std::vector<std::string> *customUniformOrder = nullptr;
 };
 
 // 前向声明，避免把 GLFW 头文件带到所有包含方

@@ -962,8 +962,10 @@ void VulkanRenderAPI::SubmitSceneMesh(const Mesh &mesh, const glm::mat4 &model,
     // 材质参数 → push constant vec4（粗糙度, 金属度, AO, 纹理索引）
     glm::vec4 material(params.roughness, params.metallic, params.ao,
                        (float)params.textureIndex);
+    // M4：自定义材质 uniform（OpenGL 风格 SetUniform(key,type,value)）→ binding 12 动态 UBO
     sceneRenderer->Submit(*mesh.vulkanBuffer, model, params.color, material,
-                          castsShadow, params.pipelineIndex);
+                          castsShadow, params.pipelineIndex,
+                          params.customUniforms, params.customUniformOrder);
     hasSceneMesh = true;
 }
 

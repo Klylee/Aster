@@ -145,6 +145,13 @@ void Model::draw()
             mp.ao = material->ao;
             mp.textureIndex = material->textureIndex;
             mp.pipelineIndex = material->vulkanPipeline; // M3：自定义 shader 管线
+            // M4：自定义材质 uniform（SetUniform(key,type,value)）→ binding 12 动态 UBO。
+            // 指针指向 material 的 map/顺序，SubmitSceneMesh 本帧内打包完成，安全。
+            if (material->HasCustomUniforms())
+            {
+                mp.customUniforms = &material->GetUniforms();
+                mp.customUniformOrder = &material->GetUniformOrder();
+            }
         }
         glm::mat4 modelMat = transform.GetLocalToWorld();
         for (const auto &mesh : meshes)

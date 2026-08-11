@@ -9,6 +9,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/constants.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 namespace aster
 {
@@ -31,6 +32,92 @@ struct MeshPushConstants
 static glm::mat4 VulkanYFlip(const glm::mat4 &m)
 {
     return glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, -1.0f, 1.0f)) * m;
+}
+
+// M4：把 Material 的 SetUniform(key,type,value) 自定义参数打包为 std140 vec4 数组
+// （写入 binding 12 动态 UBO，每个槽位 = 一个 vec4；mat4 占 4 个 vec4）。
+// 顺序 = SetUniform 注册顺序（uniformOrder）；未提供时按 key 字典序兜底（确定性）。
+// 与自定义 shader 里 `uniform MaterialParams { vec4 params[8]; } uMatParams;` 的
+// params[i] 下标一一对应。
+static void PackCustomUniforms(
+    const std::unordered_map<std::string, std::pair<std::string, std::any>> &uniforms,
+    const std::vector<std::string> *order,
+    std::vector<float> &out)
+{
+    out.clear();
+
+    // 确定打包顺序
+    std::vector<std::string> keys;
+    if (order && !order->empty())
+    {
+        keys.reserve(order->size());
+        for (const auto &k : *order)
+            if (uniforms.count(k) > 0)
+                keys.push_back(k); // 过滤 map 中不存在的 key（防御）
+    }
+    else
+    {
+        keys.reserve(uniforms.size());
+        for (const auto &kv : uniforms)
+            keys.push_back(kv.first);
+        std::sort(keys.begin(), keys.end());
+    }
+
+    auto pushVec4 = [&](const glm::vec4 &v) -> bool
+    {
+        if ((int)out.size() + 4 > VulkanPipeline::MATERIAL_PARAMS_VEC4 * 4)
+            return false; // 超出 8 个 vec4 容量
+        out.push_back(v.x);
+        out.push_back(v.y);
+        out.push_back(v.z);
+        out.push_back(v.w);
+        return true;
+    };
+
+    for (const auto &key : keys)
+    {
+        auto it = uniforms.find(key);
+        if (it == uniforms.end())
+            continue;
+        const auto &[type, value] = it->second;
+        if (type == "float")
+            pushVec4(glm::vec4(std::any_cast<float>(value), 0.0f, 0.0f, 0.0f));
+        else if (type == "int")
+            pushVec4(glm::vec4((float)std::any_cast<int>(value), 0.0f, 0.0f, 0.0f));
+        else if (type == "uint")
+            pushVec4(glm::vec4((float)std::any_cast<unsigned int>(value), 0.0f, 0.0f, 0.0f));
+        else if (type == "vec3f")
+        {
+            glm::vec3 v = std::any_cast<glm::vec3>(value);
+            pushVec4(glm::vec4(v, 0.0f));
+        }
+        else if (type == "vec4f")
+            pushVec4(std::any_cast<glm::vec4>(value));
+        else if (type == "vec3i")
+        {
+            glm::ivec3 v = std::any_cast<glm::ivec3>(value);
+            pushVec4(glm::vec4((float)v.x, (float)v.y, (float)v.z, 0.0f));
+        }
+        else if (type == "vec4i")
+        {
+            glm::ivec4 v = std::any_cast<glm::ivec4>(value);
+            pushVec4(glm::vec4((float)v.x, (float)v.y, (float)v.z, (float)v.w));
+        }
+        else if (type == "mat4")
+        {
+            if ((int)out.size() + 16 > VulkanPipeline::MATERIAL_PARAMS_VEC4 * 4)
+                break; // 空间不足，丢弃剩余参数
+            glm::mat4 m = std::any_cast<glm::mat4>(value);
+            const float *p = glm::value_ptr(m); // 列主序，16 floats = 4 个 vec4
+            for (int i = 0; i < 16; i++)
+                out.push_back(p[i]);
+        }
+        else
+        {
+            std::cerr << "[Vulkan] PackCustomUniforms: unknown uniform type '"
+                      << type << "' for '" << key << "'" << std::endl;
+        }
+    }
 }
 
 bool VulkanSceneRenderer::Init(VkDevice device, VkPhysicalDevice physicalDevice,
@@ -119,16 +206,35 @@ void VulkanSceneRenderer::Shutdown()
 void VulkanSceneRenderer::BeginFrame()
 {
     drawCalls.clear();
+    paramSlotCounter_ = 0;
+    hasCustomParams_ = false;
 }
 
 void VulkanSceneRenderer::Submit(const VulkanMeshBuffer &mesh,
                                  const glm::mat4 &model, const glm::vec4 &color,
                                  const glm::vec4 &material, bool castsShadow,
-                                 int pipelineIndex)
+                                 int pipelineIndex,
+                                 const std::unordered_map<std::string, std::pair<std::string, std::any>> *customUniforms,
+                                 const std::vector<std::string> *customUniformOrder)
 {
     if (!pipeline)
         return;
-    drawCalls.push_back({&mesh, model, color, material, castsShadow, pipelineIndex});
+    DrawCall dc{&mesh, model, color, material, castsShadow, pipelineIndex, 0};
+
+    // M4：打包自定义参数到 binding 12 动态 UBO 的某个槽位（本帧有效）
+    if (customUniforms && !customUniforms->empty())
+    {
+        std::vector<float> packed;
+        PackCustomUniforms(*customUniforms, customUniformOrder, packed);
+        if (!packed.empty() && paramSlotCounter_ < VulkanPipeline::MATERIAL_PARAMS_SLOTS)
+        {
+            dc.paramSlot = paramSlotCounter_++;
+            pipeline->UpdateMaterialParams(dc.paramSlot, packed.data(), (int)(packed.size() / 4));
+            hasCustomParams_ = true;
+        }
+    }
+
+    drawCalls.push_back(dc);
 }
 
 int VulkanSceneRenderer::CreateMaterialPipeline(const std::string &shaderDir,
@@ -202,8 +308,9 @@ void VulkanSceneRenderer::RecordShadow(VkCommandBuffer cmd)
                 pipeline->BeginPointShadowPass(cmd, face);
                 pipeline->UpdateShadowCameraUBO(view, proj); // 阴影相机 UBO = 灯光视角（不覆盖主相机 UBO）
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetShadowPipeline());
+                const uint32_t shadowDyn = 0; // 布局含 binding 12 动态 UBO，必须提供偏移（阴影 pass 用槽 0）
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetLayout(),
-                                        0, 1, &shadowDesc, 0, nullptr);
+                                        0, 1, &shadowDesc, 1, &shadowDyn);
                 for (const auto &call : drawCalls)
                 {
                     // M3：自定义管线用自定义 shader，无法用 mesh.vert 的平面投影/深度，跳过
@@ -260,8 +367,9 @@ void VulkanSceneRenderer::RecordShadow(VkCommandBuffer cmd)
             pipeline->BeginShadowPass(cmd, shadow2DIdx);
             pipeline->UpdateShadowCameraUBO(lightView, lightProj); // 阴影相机 UBO = 灯光视角（不覆盖主相机 UBO）
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetShadowPipeline());
+            const uint32_t shadowDyn = 0; // 布局含 binding 12 动态 UBO，必须提供偏移（阴影 pass 用槽 0）
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetLayout(),
-                                    0, 1, &shadowDesc, 0, nullptr);
+                                    0, 1, &shadowDesc, 1, &shadowDyn);
             for (const auto &call : drawCalls)
             {
                 // M3：自定义管线用自定义 shader，无法用 mesh.vert 的平面投影/深度，跳过
@@ -327,11 +435,10 @@ void VulkanSceneRenderer::Record(VkCommandBuffer cmd, const glm::mat4 &view, con
         pipeline->RecordSkybox(cmd, invViewProj, envYaw_, envExposure_);
     }
 
-    // 重新绑定主 mesh 管线（RecordSkybox 已切换到天空盒管线）
-    pipeline->Bind(cmd);
-
     // M3：按 pipelineIndex 分组绘制。所有管线共享同一描述符集（相机/灯光/环境/
     // 材质纹理 UBO 已在上方更新一次）。0 = 默认 mesh 管线，>=1 = 自定义管线。
+    // M4：无自定义参数时每组只绑一次（dynamicOffset=0，槽 0 为零填充）；
+    // 有自定义参数时 per-draw 绑定，dynamicOffset = 槽位 * GetMaterialParamsStride()。
     std::vector<int> usedPipelines;
     for (const auto &call : drawCalls)
         if (std::find(usedPipelines.begin(), usedPipelines.end(), call.pipelineIndex) ==
@@ -341,25 +448,38 @@ void VulkanSceneRenderer::Record(VkCommandBuffer cmd, const glm::mat4 &view, con
 
     for (int idx : usedPipelines)
     {
+        VkPipeline cp;
         if (idx == 0)
-        {
-            pipeline->Bind(cmd); // 默认 mesh 管线（含描述集）
-        }
+            cp = pipeline->GetPipeline(); // 默认 mesh 管线
         else
+            cp = pipeline->GetMaterialPipeline(idx); // 自定义管线
+        if (!cp)
+            continue;
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, cp);
+
+        if (!hasCustomParams_)
         {
-            VkPipeline cp = pipeline->GetMaterialPipeline(idx);
-            if (!cp)
-                continue;
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, cp);
             VkDescriptorSet ds = pipeline->GetDescriptorSet();
+            const uint32_t dyn = 0;
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetLayout(),
-                                    0, 1, &ds, 0, nullptr);
+                                    0, 1, &ds, 1, &dyn);
         }
 
         for (const auto &call : drawCalls)
         {
             if (call.pipelineIndex != idx)
                 continue;
+
+            // M4：自定义参数 → per-draw 绑定（dynamicOffset 切换槽位）
+            if (hasCustomParams_)
+            {
+                VkDescriptorSet ds = pipeline->GetDescriptorSet();
+                uint32_t dyn = (uint32_t)((size_t)call.paramSlot *
+                                          (size_t)pipeline->GetMaterialParamsStride());
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetLayout(),
+                                        0, 1, &ds, 1, &dyn);
+            }
+
             MeshPushConstants pc{};
             pc.model = call.model;
             pc.color = call.color;

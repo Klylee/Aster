@@ -3,6 +3,7 @@
 #include <string>
 #include <any>
 #include <memory>
+#include <vector>
 #include <glm/glm.hpp>
 
 #include "Shader.h"
@@ -35,6 +36,11 @@ class Material
 {
     std::shared_ptr<Shader> shader;
     std::unordered_map<std::string, std::pair<std::string, std::any>> uniforms;
+    // uniform 注册顺序（SetUniform 的调用顺序）。
+    //  - OpenGL 后端：顺序无关（glGetUniformLocation 按名查找），仅作调试用。
+    //  - Vulkan 后端：绑定 12 动态 UBO 按此顺序打包，自定义 shader 的
+    //    MaterialParams.params[i] 必须与注册顺序一一对应（见 assets/shader/vulkan/*.frag）。
+    std::vector<std::string> uniformOrder;
 
 public:
     RenderState renderState;
@@ -65,9 +71,21 @@ public:
 
     void SetUniform(const std::string &name, const std::string &type, const std::any &value)
     {
+        if (uniforms.find(name) == uniforms.end())
+            uniformOrder.push_back(name); // 首次注册记录顺序（Vulkan 打包用）
         uniforms[name] = {type, value};
     }
     std::shared_ptr<Shader> GetShader() const { return shader; }
+
+    // ---- 自定义 uniform 访问（Vulkan 后端打包到 binding 12 动态 UBO） ----
+    // 与 OpenGL 的 SetUniform(key,type,value) 语义一致：每个 key 一个命名参数，
+    // Vulkan 自定义 shader 按注册顺序在 MaterialParams.params[i] 中读取。
+    const std::unordered_map<std::string, std::pair<std::string, std::any>> &GetUniforms() const
+    {
+        return uniforms;
+    }
+    const std::vector<std::string> &GetUniformOrder() const { return uniformOrder; }
+    bool HasCustomUniforms() const { return !uniforms.empty(); }
 
     void ApplyUniforms();
     void ApplyRenderState();

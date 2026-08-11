@@ -51,6 +51,11 @@ private:
     std::shared_ptr<Material> material2;     // 第二颗球材质（"sphere" 的实例 "sphere_blue"）
     std::shared_ptr<Material> groundMaterial; // 地面材质（OpenGL IBL uniform 更新用）
     int toonPipeline = -1;       // M3：自定义 toon 管线索引（地面材质使用）
+    // ---- M4：地面（toon）材质的自定义 uniform（SetUniform(key,type,value)）----
+    float toonBandThresh = 0.75f;  // params[0].x 卡通量化阈值
+    float toonSpecPow = 24.0f;     // params[1].x 高光幂
+    float toonRim = 0.3f;          // params[2].x 边缘暗化强度
+    glm::vec3 toonTint = glm::vec3(1.0f); // params[3].rgb 卡通染色
     float rotationTime = 0.0f;
     bool softShadow = true;      // 软阴影开关（ImGui 按钮切换）
     int shadowDebugView = 0;     // shadowmap 调试视图（0=正常，1=2D，2=点光源 cubemap）
