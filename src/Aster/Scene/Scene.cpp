@@ -29,30 +29,40 @@ void Scene::AddSceneObject(const std::shared_ptr<SceneObject> &obj)
 void Scene::Remove(const std::string &name)
 {
     auto it = sceneObjectMap.find(name);
-    if (it != sceneObjectMap.end())
-    {
-        auto target = it->second.lock();
-        if (target)
-        {
-            for (auto &child : target->children)
-            {
-                Remove(child->objName);
-            }
-            sceneObjects.erase(
-                std::remove_if(sceneObjects.begin(), sceneObjects.end(),
-                               [&](auto &o)
-                               { return o == target; }),
-                sceneObjects.end());
+    if (it == sceneObjectMap.end())
+        return;
+    auto target = it->second.lock();
+    sceneObjectMap.erase(it); // 无论对象是否仍存活，都移除名字索引
+    if (target)
+        Remove(target);
+}
 
-            auto lightPtr = std::dynamic_pointer_cast<Light>(target);
-            if (lightPtr)
-            {
-                lightManager.RemoveLight(lightPtr);
-            }
-        }
-        sceneObjectMap.erase(it);
-        std::cout << "Removed " << "<" << target->className << ">" << name << std::endl;
+void Scene::Remove(const std::shared_ptr<SceneObject> &target)
+{
+    if (!target)
+        return;
+    // 先删子对象
+    for (auto &child : target->children)
+    {
+        Remove(child->objName);
     }
+    // 从对象列表移除（引用计数归零即销毁，Mesh / VulkanMeshBuffer 随之释放）
+    sceneObjects.erase(
+        std::remove_if(sceneObjects.begin(), sceneObjects.end(),
+                       [&](auto &o)
+                       { return o == target; }),
+        sceneObjects.end());
+    // 从名字索引移除（若名字已被改则忽略遗留项）
+    auto it = sceneObjectMap.find(target->objName);
+    if (it != sceneObjectMap.end() && it->second.lock() == target)
+        sceneObjectMap.erase(it);
+    // 灯光
+    auto lightPtr = std::dynamic_pointer_cast<Light>(target);
+    if (lightPtr)
+    {
+        lightManager.RemoveLight(lightPtr);
+    }
+    std::cout << "Removed " << "<" << target->className << ">" << target->objName << std::endl;
 }
 
 void Scene::UpdateAll()

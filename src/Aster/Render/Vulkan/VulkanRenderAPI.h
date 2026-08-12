@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RenderAPI.h"
+#include <memory>
 #include <vector>
 #include <vulkan/vulkan.h>
 
@@ -52,8 +53,9 @@ public:
     // castsShadow：该网格是否投影平面阴影（接收体如地面应传 false）。
     // pickOwner：非空时该网格属于可拾取对象（Model::collectable），
     //   会分配一个稳定拾取 ID 并画进离屏 id map（供 PickAt 反查）。
+    //   持弱引用（weak_ptr）：模型被动态删除后注册表自动失效，PickAt 不会悬垂。
     void SubmitSceneMesh(const Mesh &mesh, const glm::mat4 &model, const MaterialParams &params,
-                         bool castsShadow = true, const Model *pickOwner = nullptr);
+                         bool castsShadow = true, const std::weak_ptr<Model> &pickOwner = {});
 
     // 鼠标拾取：返回 (x, y)（窗口坐标）处命中的可拾取 Model，未命中返回 nullptr。
     // 读回的是“最近一帧已提交完成”的 id map（本帧渲染在 Present 中完成，之后才准确）。
@@ -130,12 +132,11 @@ private:
     VulkanSceneRenderer *sceneRenderer = nullptr;
     VulkanMeshBuffer *cubeMesh = nullptr;
 
-    // ---- 拾取注册表（Model* → 稳定拾取 ID；ID → Model*） ----
-    // ID 从 1 起，0 = 背景（未命中）；pickIdToModel_[0] 恒为 nullptr 占位。
-    std::unordered_map<const Model *, int> modelPickIds_;
-    std::vector<const Model *> pickIdToModel_;
-    // 为模型分配/获取稳定拾取 ID（首次出现时分配）
-    int GetOrAssignPickId(const Model *m);
+    // ---- 拾取注册表（ID → Model 弱引用） ----
+    // ID 从 1 起，0 = 背景（未命中）；pickIdToModel_[0] 恒为空占位。
+    // 持弱引用：模型被动态删除后 lock() 为空，PickAt 返回 nullptr（不会悬垂）。
+    // 每个模型分配到的 ID 记录在 Model::pickId 字段。
+    std::vector<std::weak_ptr<Model>> pickIdToModel_;
 
     // ---- 场景渲染状态（Model 提交的网格 + 场景相机） ----
     glm::mat4 sceneView{1.0f};

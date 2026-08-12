@@ -19,6 +19,7 @@
 
 #include "Aster/Resource/Shader.h"
 #include "Aster/Resource/MaterialManager.h"
+#include "Aster/Resource/MeshManager.h" // LoadMeshFromRawData：程序化网格注册进 meshCache，供 CleanupUnusedMeshes 定期回收
 #include "Aster/Render/Renderer.h"
 #include "Aster/Core/Path.h"
 #include "Aster/Lighting/Light.h"
@@ -183,8 +184,8 @@ bool ModelDemoApp::InitScene()
     std::vector<float> pPos, pNor;
     std::vector<unsigned int> pIdx;
     BuildPlane(100.0f, pPos, pNor, pIdx);
-    auto planeMesh = std::make_shared<Mesh>(pPos, pIdx, pNor);
-    planeMesh->initialize();
+    // 经 MeshManager 注册（进 meshCache），CleanupUnusedMeshes 才能定期回收
+    auto planeMesh = MeshManager::Instance().LoadMeshFromRawData("ground", pPos, pIdx, pNor);
     // M2：平面 UV（0..1 覆盖整张地面，供材质纹理采样）
     for (int i = 0; i < planeMesh->v_num; i++)
     {
@@ -199,7 +200,7 @@ bool ModelDemoApp::InitScene()
     planeModel->meshes.push_back(planeMesh);
     planeModel->transform.SetPosition(Vec3(0.0f, -1.0f, 0.0f));
     planeModel->material = registerMaterial("ground", glm::vec4(0.55f, 0.55f, 0.58f, 1.0f));
-    groundMaterial = planeModel->material; // 保存引用（OpenGL 每帧更新环境 uniform）
+    auto groundMaterial = planeModel->material; // 局部对象：由场景（planeModel）持有
     // M1：地面设为哑光材质（roughness=1 不反射环境），体现每对象材质差异
     groundMaterial->roughness = 1.0f;
     groundMaterial->metallic = 0.0f;
@@ -236,10 +237,10 @@ bool ModelDemoApp::InitScene()
             std::vector<float> gPos, gNor;
             std::vector<unsigned int> gIdx;
             BuildPlane(600.0f, gPos, gNor, gIdx); // 大平面：网格延伸很远（±300）
-            auto gridMesh = std::make_shared<Mesh>(gPos, gIdx, gNor);
-            gridMesh->initialize();
+            // 经 MeshManager 注册（进 meshCache），删除 grid 模型后可被定期清理
+            auto gridMesh = MeshManager::Instance().LoadMeshFromRawData("ground_grid", gPos, gIdx, gNor);
 
-            gridMaterial = mm.RegisterMaterial("ground_grid", glm::vec4(0.1f, 0.85f, 0.45f, 1.0f));
+            auto gridMaterial = mm.RegisterMaterial("ground_grid", glm::vec4(0.1f, 0.85f, 0.45f, 1.0f));
             gridMaterial->vulkanPipeline = gridPipeline;
             // M4：自定义 uniform —— 每个 uniform 占一个 vec4 槽位，注册顺序与
             // grid.frag 的 params 下标一一对应：
@@ -252,7 +253,7 @@ bool ModelDemoApp::InitScene()
             gridMaterial->SetUniform("fadeEnd", "float", gridFadeEnd);
             gridMaterial->SetUniform("lineWidth", "float", gridLineWidth);
 
-            gridModel = std::make_shared<Model>();
+            auto gridModel = std::make_shared<Model>();
             gridModel->objName = "ground_grid";
             gridModel->castsShadow = false; // 自定义管线不进阴影 pass
             gridModel->collectable = true;  // 拾取：加入 id map
@@ -271,8 +272,9 @@ bool ModelDemoApp::InitScene()
     std::vector<unsigned int> indices;
     BuildIcoSphere(1, positions, normals, indices, 2.0f); // 细分 1 = 明显棱角
 
-    mesh = std::make_shared<Mesh>(positions, indices, normals);
-    mesh->initialize(); // Vulkan 后端下内部跳过 OpenGL 缓冲创建
+    // 经 MeshManager 注册（进 meshCache）；Vulkan 后端 initialize 内部跳过 OpenGL 缓冲创建。
+    // 局部对象：由两个球（model / secondModel）共享持有，demo 不额外强引用。
+    auto mesh = MeshManager::Instance().LoadMeshFromRawData("icosphere", positions, indices, normals);
 
     // M2：icosphere 球面 UV（等距柱状投影，供材质纹理采样）
     {
@@ -286,12 +288,12 @@ bool ModelDemoApp::InitScene()
         }
     }
 
-    model = std::make_shared<Model>();
+    auto model = std::make_shared<Model>();
     model->objName = "icosphere";
     model->castsShadow = true;
     model->collectable = true; // 拾取：加入 id map
     model->meshes.push_back(mesh);
-    material = registerMaterial("sphere", glm::vec4(1.0f, 0.62f, 0.25f, 1.0f));
+    auto material = registerMaterial("sphere", glm::vec4(1.0f, 0.62f, 0.25f, 1.0f));
     model->material = material;
     // M1：球体材质参数由滑块控制（每对象，与地面哑光材质不同）
     material->roughness = envRoughness;
@@ -329,7 +331,7 @@ bool ModelDemoApp::InitScene()
 
     // ---- 第二颗球：MaterialManager 材质实例（共享 "sphere" 的 shader，参数独立） ----
     // 演示“物体 A / B 用同一 shader，只是颜色 / 粗糙度不同”
-    material2 = mm.CreateMaterialInstance("sphere_blue", "sphere");
+    auto material2 = mm.CreateMaterialInstance("sphere_blue", "sphere");
     if (material2)
     {
         material2->color = glm::vec4(0.30f, 0.55f, 0.95f, 1.0f); // 蓝色
@@ -339,7 +341,7 @@ bool ModelDemoApp::InitScene()
         material2->textureIndex = -1;   // 纯色（不用棋盘纹理）
         material2->SetUniform("color", "vec4f", material2->color); // OpenGL uniform
     }
-    secondModel = std::make_shared<Model>();
+    auto secondModel = std::make_shared<Model>();
     secondModel->objName = "sphereB";
     secondModel->castsShadow = true;
     secondModel->collectable = true; // 拾取：加入 id map
@@ -412,6 +414,24 @@ void ModelDemoApp::Update()
 {
     App::Update(); // 场景对象更新（相机 WASD 控制等）
 
+    if (Input::isKeyPressed(GLFW_KEY_P))
+    {
+        // 打印当前MeshManager中注册的所有网格信息
+        MeshManager::Instance().PrintStatus();
+    }
+
+    // 场景对象由 InitScene 局部创建、场景持有，这里按名查询（可能已被删除 → 判空）
+    auto getModel = [](const char *name) -> std::shared_ptr<Model>
+    {
+        return SceneManager::Instance().GetObject<Model>(name);
+    };
+    auto getMat = [&](const char *name) -> std::shared_ptr<Material>
+    {
+        if (auto m = getModel(name))
+            return m->material;
+        return nullptr;
+    };
+
     // 软阴影开关 + shadowmap 调试视图同步到后端（按钮切换 + 初始状态）
     if (renderAPI)
     {
@@ -426,22 +446,25 @@ void ModelDemoApp::Update()
                                     glm::radians(envYawDeg), envExposure, envToneMap);
 
             // M1：每对象材质参数 —— 滑块控制球体材质（地面保持哑光 roughness=1）
-            if (material)
+            if (auto mat = getMat("icosphere"))
             {
-                material->roughness = envRoughness;
-                material->metallic = envMetallic;
-                material->ao = envAO;
+                mat->roughness = envRoughness;
+                mat->metallic = envMetallic;
+                mat->ao = envAO;
             }
 
             // M4：Vulkan 后端每帧同步地面（toon）材质的自定义 uniform，
             // 滑块改动立即生效（打包到 binding 12 动态 UBO）。
             // 注：OpenGL 后端的地面用 env_ibl shader，不含这些参数，故跳过。
-            if (renderAPI->IsVulkan() && groundMaterial && toonPipeline > 0)
+            if (renderAPI->IsVulkan() && toonPipeline > 0)
             {
-                groundMaterial->SetUniform("bandThresh", "float", toonBandThresh);
-                groundMaterial->SetUniform("specPow", "float", toonSpecPow);
-                groundMaterial->SetUniform("rimStrength", "float", toonRim);
-                groundMaterial->SetUniform("toonTint", "vec3f", toonTint);
+                if (auto gm = getMat("ground"))
+                {
+                    gm->SetUniform("bandThresh", "float", toonBandThresh);
+                    gm->SetUniform("specPow", "float", toonSpecPow);
+                    gm->SetUniform("rimStrength", "float", toonRim);
+                    gm->SetUniform("toonTint", "vec3f", toonTint);
+                }
             }
 
             // OpenGL 后端：环境参数经材质 uniform 传给场景着色器（env_ibl.shader）
@@ -462,32 +485,38 @@ void ModelDemoApp::Update()
                     if (auto cam = SceneManager::Instance().GetMainCamera())
                         m->SetUniform("uCamPos", "vec3f", cam->transform.GetPosition());
                 };
-                applyEnvTo(material);
-                applyEnvTo(groundMaterial);
+                applyEnvTo(getMat("icosphere"));
+                applyEnvTo(getMat("ground"));
             }
         }
 
         // M4：每帧同步地面网格线材质的自定义 uniform（滑块实时生效，Vulkan 专用）
-        if (renderAPI->IsVulkan() && gridMaterial && gridPipeline > 0)
+        if (renderAPI->IsVulkan() && gridPipeline > 0)
         {
-            gridMaterial->SetUniform("gridColor", "vec3f", gridColor);
-            gridMaterial->SetUniform("opacity", "float", gridOpacity);
-            gridMaterial->SetUniform("cellSize", "float", gridCellSize);
-            gridMaterial->SetUniform("fadeStart", "float", gridFadeStart);
-            gridMaterial->SetUniform("fadeEnd", "float", gridFadeEnd);
-            gridMaterial->SetUniform("lineWidth", "float", gridLineWidth);
+            if (auto gm = getMat("ground_grid"))
+            {
+                gm->SetUniform("gridColor", "vec3f", gridColor);
+                gm->SetUniform("opacity", "float", gridOpacity);
+                gm->SetUniform("cellSize", "float", gridCellSize);
+                gm->SetUniform("fadeStart", "float", gridFadeStart);
+                gm->SetUniform("fadeEnd", "float", gridFadeEnd);
+                gm->SetUniform("lineWidth", "float", gridLineWidth);
+            }
         }
     }
 
-    // 模型自转
+    // 模型自转（对象可能已被删除，按名查询 + 判空）
     rotationTime += GlobalTime::GetFrameDeltaTime();
-    model->transform.SetRotation(
-        glm::angleAxis(rotationTime * 0.8f, glm::vec3(0.0f, 1.0f, 0.0f)) *
-        glm::angleAxis(rotationTime * 0.4f, glm::vec3(1.0f, 0.0f, 0.0f)));
-    // 第二颗球以不同速度自转（材质实例，行为独立）
-    if (secondModel)
+    if (auto m = getModel("icosphere"))
     {
-        secondModel->transform.SetRotation(
+        m->transform.SetRotation(
+            glm::angleAxis(rotationTime * 0.8f, glm::vec3(0.0f, 1.0f, 0.0f)) *
+            glm::angleAxis(rotationTime * 0.4f, glm::vec3(1.0f, 0.0f, 0.0f)));
+    }
+    // 第二颗球以不同速度自转（材质实例，行为独立）
+    if (auto m = getModel("sphereB"))
+    {
+        m->transform.SetRotation(
             glm::angleAxis(rotationTime * -0.5f, glm::vec3(0.0f, 1.0f, 0.0f)) *
             glm::angleAxis(rotationTime * 0.3f, glm::vec3(1.0f, 0.0f, 0.0f)));
     }
@@ -513,7 +542,10 @@ void ModelDemoApp::RenderImGui()
     // ImGui::ShowDemoWindow();
     ImGui::Begin("Model Demo");
     ImGui::Text("Active backend: %s", renderAPI->Name());
-    ImGui::Text("Vertices: %d, Indices: %d", mesh->v_num, mesh->i_num);
+    // icosphere 网格已由场景持有，经 MeshManager 缓存查询（可能已被删除/GC → 判空）
+    auto icoMesh = MeshManager::Instance().Get("icosphere");
+    ImGui::Text("Vertices: %d, Indices: %d",
+                icoMesh ? icoMesh->v_num : 0, icoMesh ? icoMesh->i_num : 0);
 
     // ---- 全局材质管理器（MaterialManager）展示 ----
     auto &mm = MaterialManager::Instance();
@@ -533,7 +565,9 @@ void ModelDemoApp::RenderImGui()
     // ImGui::TextWrapped("'sphere_blue' 是 'sphere' 的实例：共享同一 shader，颜色/粗糙度独立。");s
 
     ImGui::Separator();
-    ImGui::ColorEdit4("Material color", glm::value_ptr(material->color));
+    if (auto m = SceneManager::Instance().GetObject<Model>("icosphere"))
+        if (m->material)
+            ImGui::ColorEdit4("Material color", glm::value_ptr(m->material->color));
 
     // 软/硬阴影切换
     ImGui::Separator();
@@ -608,10 +642,24 @@ void ModelDemoApp::RenderImGui()
                        "Collectable objects are rendered to an offscreen id map, "
                        "the pixel id is read back to find the clicked object.");
     if (pickedModel)
+    {
         ImGui::Text("Picked: %s", pickedModel->objName.c_str());
+        // 动态删除：Unity 风格 Destroy(obj, delay)。对象由场景持有，Destroy 一律
+        // 延迟到下一帧 Update（渲染提交前）移除；demo 无额外强引用，对象真正析构、
+        // GPU 缓冲可被回收；弱引用拾取注册表保证不悬垂。
+        ImGui::SliderFloat("Delete Delay", &deleteDelay, 0.0f, 5.0f, "%.1f s");
+        if (ImGui::Button("Delete picked object"))
+        {
+            std::string name = pickedModel->objName;
+            pickedModel = nullptr; // 先清掉，避免模型销毁后悬垂
+            SceneManager::Instance().Destroy(name, deleteDelay);
+        }
+    }
     else
+    {
         ImGui::Text("Picked: (none)");
-    ImGui::TextWrapped("Model::collectable = true 加入可拾取列表；PickAt 返回命中的 Model。");
+    }
+    // ImGui::TextWrapped("Model::collectable = true 加入可拾取列表；PickAt 返回命中的 Model。");
 
     // ---- 环境贴图（HDR IBL）控制 ----
     ImGui::Separator();

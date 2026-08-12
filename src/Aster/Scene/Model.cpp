@@ -154,10 +154,11 @@ void Model::draw()
             }
         }
         glm::mat4 modelMat = transform.GetLocalToWorld();
+        // collectable：该对象画进离屏 id map，供鼠标拾取（PickAt）。
+        // 传 weak_ptr<Model>：拾取注册表持弱引用，模型删除后自动失效，无悬垂指针。
+        std::weak_ptr<Model> self = collectable ? weak_from_this() : std::weak_ptr<Model>{};
         for (const auto &mesh : meshes)
-            // collectable：该对象画进离屏 id map，供鼠标拾取（PickAt）
-            vk->SubmitSceneMesh(*mesh, modelMat, mp, castsShadow,
-                                collectable ? this : nullptr);
+            vk->SubmitSceneMesh(*mesh, modelMat, mp, castsShadow, self);
         return;
     }
 #endif

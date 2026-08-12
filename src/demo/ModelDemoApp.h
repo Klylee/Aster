@@ -44,12 +44,9 @@ protected:
     void RenderImGui() override;  // 后端信息 / 顶点数 / 颜色面板
 
 private:
-    std::shared_ptr<Mesh> mesh;
-    std::shared_ptr<Model> model;
-    std::shared_ptr<Model> secondModel;       // 第二颗球（材质实例，演示“同 shader 不同参数”）
-    std::shared_ptr<Material> material;      // 棱角球材质（基础材质 "sphere"）
-    std::shared_ptr<Material> material2;     // 第二颗球材质（"sphere" 的实例 "sphere_blue"）
-    std::shared_ptr<Material> groundMaterial; // 地面材质（OpenGL IBL uniform 更新用）
+    // 注：场景对象（mesh/model/material/grid 等）由 InitScene 以局部对象创建并交给
+    // 场景持有，demo 不再持有强引用 —— 删除对象后引用计数能真正归零、资源可被回收。
+    // 需要访问时通过 SceneManager::GetObject<Model>(name) 按名查询。
     int toonPipeline = -1;       // M3：自定义 toon 管线索引（地面材质使用）
     // ---- M4：地面（toon）材质的自定义 uniform（SetUniform(key,type,value)）----
     float toonBandThresh = 0.75f;  // params[0].x 卡通量化阈值
@@ -58,8 +55,6 @@ private:
     glm::vec3 toonTint = glm::vec3(1.0f); // params[3].rgb 卡通染色
 
     // ---- 地面网格线（自定义 grid shader，M4 自定义 uniform）----
-    std::shared_ptr<Model> gridModel;    // 网格线物体（大平面 + grid 材质）
-    std::shared_ptr<Material> gridMaterial; // 网格线材质
     int gridPipeline = -1;               // 自定义 grid 管线索引（混合开启 / 深度写关闭）
     glm::vec3 gridColor = glm::vec3(0.10f, 0.85f, 0.45f); // params[0].rgb 线框颜色
     float gridOpacity = 0.6f;            // params[1].x 透明度
@@ -74,6 +69,7 @@ private:
     // ---- 鼠标拾取（id map）----
     const Model *pickedModel = nullptr; // 最近一次左键点击命中的可拾取对象
     bool prevLeftDown_ = false;         // 上一帧左键状态（边沿检测，避免按住时每帧触发）
+    float deleteDelay = 0.0f;           // 删除延迟（秒），演示 SceneManager::Destroy(obj, delay)
 
     // ---- 环境贴图（HDR IBL）控制 ----
     std::shared_ptr<EnvironmentMap> environmentMap; // 加载自 assets/HDRIs/*.exr

@@ -39,6 +39,8 @@ public:
 
     // 移除对象和它的子对象；实现见 Scene.cpp
     void Remove(const std::string &name);
+    // 按对象指针移除（比按名字更稳健，延迟销毁/拾取删除用）
+    void Remove(const std::shared_ptr<SceneObject> &target);
 
     // 调用所有对象的更新与绘制；实现见 Scene.cpp
     void UpdateAll();

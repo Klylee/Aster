@@ -250,6 +250,10 @@ void App::Render()
         if (auto camera = SceneManager::Instance().GetMainCamera())
             renderAPI->SetSceneCamera(camera->GetViewMatrix(),
                                       camera->GetProjectionMatrix((float)width / (float)height));
+
+        // 定期清理无引用 mesh（与 OpenGL 分支一致）：缓存中长时间未被引用的
+        // Mesh 被释放，其 VulkanMeshBuffer 也随之销毁（引用计数即时回收）。
+        MeshManager::Instance().CleanupUnusedMeshes();
     }
 }
 

@@ -9,7 +9,7 @@
 namespace aster
 {
 
-class Model : public SceneObject
+class Model : public SceneObject, public std::enable_shared_from_this<Model>
 {
 public:
     REGISTER_SCENE_OBJECT(Model)
@@ -46,6 +46,10 @@ public:
     // 渲染时被画进离屏 id map（每个可拾取对象一个唯一 ID 颜色），
     // 鼠标点击后按 id map 像素值反查命中的对象。
     bool collectable = false;
+
+    // 拾取 ID（Vulkan 后端在首次提交可拾取对象时分配；0 = 未分配）。
+    // 存于模型自身：即使模型被动态删除，拾取注册表只持弱引用，不会悬垂。
+    int pickId = 0;
 };
 
 } // namespace aster

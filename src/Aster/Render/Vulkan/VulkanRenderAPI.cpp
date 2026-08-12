@@ -2,7 +2,8 @@
 #include "VulkanSceneRenderer.h"
 #include "VulkanMeshBuffer.h"
 #include "VulkanUtil.h"
-#include "Mesh.h" // 框架 Mesh：SubmitSceneMesh 懒创建 VulkanMeshBuffer
+#include "Mesh.h"  // 框架 Mesh：SubmitSceneMesh 懒创建 VulkanMeshBuffer
+#include "Model.h" // 拾取：注册表持有 weak_ptr<Model>，需完整类型访问 Model::pickId
 
 #include <algorithm>
 #include <array>
@@ -942,7 +943,7 @@ void VulkanRenderAPI::DestroySceneRenderer()
 
 void VulkanRenderAPI::SubmitSceneMesh(const Mesh &mesh, const glm::mat4 &model,
                                       const MaterialParams &params, bool castsShadow,
-                                      const Model *pickOwner)
+                                      const std::weak_ptr<Model> &pickOwner)
 {
     if (!sceneRenderer)
         return;
@@ -972,30 +973,26 @@ void VulkanRenderAPI::SubmitSceneMesh(const Mesh &mesh, const glm::mat4 &model,
                           castsShadow, params.pipelineIndex,
                           params.customUniforms, params.customUniformOrder);
 
-    // 拾取：可拾取对象（pickOwner 非空）画进离屏 id map（稳定 ID → 像素颜色）
-    if (pickOwner)
+    // 拾取：可拾取对象（pickOwner 有效）画进离屏 id map（稳定 ID → 像素颜色）。
+    // 使用 weak_ptr：模型删除后 lock() 为空，注册表自动失效，无悬垂指针。
+    if (auto owner = pickOwner.lock())
     {
-        int pickId = GetOrAssignPickId(pickOwner);
+        int pickId = owner->pickId;
+        if (pickId <= 0) // 首次提交：分配稳定 ID 并登记弱引用
+        {
+            pickId = (int)pickIdToModel_.size(); // 0 = 背景占位
+            if (pickId == 0)
+            {
+                pickIdToModel_.emplace_back(); // index 0 = 背景
+                pickId = 1;
+            }
+            owner->pickId = pickId;
+            pickIdToModel_.push_back(owner); // 弱引用
+        }
         sceneRenderer->SubmitPick(*mesh.vulkanBuffer, model, pickId);
     }
 
     hasSceneMesh = true;
-}
-
-int VulkanRenderAPI::GetOrAssignPickId(const Model *m)
-{
-    auto it = modelPickIds_.find(m);
-    if (it != modelPickIds_.end())
-        return it->second;
-    int id = (int)pickIdToModel_.size(); // 0 = 背景占位
-    if (id == 0)
-    {
-        pickIdToModel_.push_back(nullptr); // index 0 = 背景
-        id = 1;
-    }
-    pickIdToModel_.push_back(m);
-    modelPickIds_[m] = id;
-    return id;
 }
 
 const Model *VulkanRenderAPI::PickAt(int x, int y)
@@ -1014,7 +1011,11 @@ const Model *VulkanRenderAPI::PickAt(int x, int y)
     }
     int id = sceneRenderer->PickAt(px, py);
     if (id > 0 && id < (int)pickIdToModel_.size())
-        return pickIdToModel_[id];
+    {
+        // 模型可能已被动态删除：弱引用 lock() 为空则视为未命中（避免悬垂指针）
+        auto sp = pickIdToModel_[id].lock();
+        return sp.get();
+    }
     return nullptr;
 }
 
