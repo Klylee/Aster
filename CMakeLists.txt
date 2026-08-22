@@ -69,6 +69,8 @@ if(ASTER_VULKAN_AVAILABLE)
             grid.vert
             grid.frag
             id.frag
+            debug.vert
+            debug.frag
         )
         set(VULKAN_SPV_OUTPUTS "")
         foreach(SHADER ${VULKAN_SHADERS})
@@ -97,6 +99,7 @@ endif()
 #   Render/       渲染抽象（RenderAPI / Renderer）+ OpenGL、Vulkan 后端
 #   Resource/     资源（Mesh / Material / Shader / Texture / MeshManager）
 #   Lighting/     灯光（Light / LightData / LightManager）
+#   Physics/      物理（RigidBody / PhysicsWorld / 碰撞 / 射线 / BVH）
 # ============================================================================
 configure_file(env_config.h.in ${CMAKE_BINARY_DIR}/env_config.h @ONLY)
 
@@ -168,6 +171,7 @@ set(ASTER_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/src/Aster/Render/Vulkan
     ${CMAKE_SOURCE_DIR}/src/Aster/Resource
     ${CMAKE_SOURCE_DIR}/src/Aster/Lighting
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics
     ${CMAKE_SOURCE_DIR}/
     ${CMAKE_BINARY_DIR}
 )
@@ -220,6 +224,21 @@ add_library(aster STATIC
     ${CMAKE_SOURCE_DIR}/src/Aster/Lighting/LightData.h
     ${CMAKE_SOURCE_DIR}/src/Aster/Lighting/LightManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Aster/Lighting/LightManager.h
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/RigidBody.cpp
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/RigidBody.h
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/PhysicsWorld.cpp
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/PhysicsWorld.h
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/NarrowPhase.cpp
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/NarrowPhase.h
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/BroadPhase.cpp
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/BroadPhase.h
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/BVH.cpp
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/BVH.h
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/CollisionShape.h
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/Collider.h
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/Contact.h
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/AABB.h
+    ${CMAKE_SOURCE_DIR}/src/Aster/Physics/Ray.h
     ${CMAKE_SOURCE_DIR}/src/Aster/Resource/Material.cpp
     ${CMAKE_SOURCE_DIR}/src/Aster/Resource/Material.h
     ${CMAKE_SOURCE_DIR}/src/Aster/Resource/MaterialManager.cpp
@@ -291,6 +310,8 @@ if(ASTER_ENABLE_DEMO)
         ${CMAKE_SOURCE_DIR}/src/demo/ModelDemo.cpp
         ${CMAKE_SOURCE_DIR}/src/demo/ModelDemo.h
         ${CMAKE_SOURCE_DIR}/src/demo/ModelDemoApp.h
+        ${CMAKE_SOURCE_DIR}/src/demo/PhysicsDemoApp.cpp
+        ${CMAKE_SOURCE_DIR}/src/demo/PhysicsDemoApp.h
     )
     aster_apply_common(aster_demo)
     target_link_libraries(aster_demo PRIVATE aster imgui)

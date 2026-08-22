@@ -73,6 +73,9 @@ public:
     // shadowmap 调试视图（转发到 sceneRenderer）
     void SetShadowDebugView(int mode) override;
 
+    // 调试线框绘制（M2，物理调试可视化）：转发到 sceneRenderer 主 pass 末尾绘制
+    void DebugDrawLines(const std::vector<glm::vec3> &segments, const glm::vec4 &color) override;
+
     // ---- 环境贴图（IBL）----
     // 上传环境贴图数据到 sceneRenderer（GPU 图像 + 描述符）
     void SetEnvironmentMap(const EnvironmentMap &env) override;

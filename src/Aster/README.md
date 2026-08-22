@@ -16,6 +16,7 @@ Aster 是 3dgs-opengl 的跨平台应用框架（C++20），以静态库 `aster`
 | `Render/Vulkan/` | Vulkan 后端 `VulkanRenderAPI` / `VulkanPipeline` / `VulkanMeshBuffer` / `VulkanSceneRenderer` / `VulkanUtil` |
 | `Resource/` | 资源：`Mesh`、`MeshManager`、`Material`、`Shader`、`Texture`、`EnvironmentMap`（HDR 环境贴图：cubemap / irradiance / 预过滤 / BRDF LUT） |
 | `Lighting/` | 灯光：`Light`、`LightData`、`LightManager` |
+| `Physics/` | 物理：`RigidBody`（运动学）、`PhysicsWorld2D/3D`（碰撞管线）、`CollisionShape`（圆/矩形/球/盒）、`NarrowPhase`（SAT 等）、`BroadPhase`、`BVH`（加速结构）、`Ray`（射线求交）、`Collider` |
 
 ## 代码约定
 

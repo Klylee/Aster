@@ -97,6 +97,17 @@ public:
     // 已创建自定义管线数量
     int GetMaterialPipelineCount() const { return (int)materialPipelines.size(); }
 
+    // ---- 调试线框绘制（M2，物理调试可视化） ----
+    // 创建调试线管线：LINE_LIST，顶点 pos3+color4（stride 28B），
+    // 独立管线布局（仅 push constant = mat4 viewProj，无描述集）。
+    // 在主 render pass 内、场景几何之后调用 RecordDebugDraw。
+    bool CreateDebugPipeline(const std::string &shaderDir);
+    VkPipeline GetDebugPipeline() const { return debugPipeline; }
+    // 录制调试线段：更新顶点缓冲（自动扩容）→ 绑管线 → push constant viewProj → draw。
+    // vertices 为 pos3+color4 交错浮点数组，vertexCount 为顶点数（应为偶数，LINE_LIST）。
+    void RecordDebugDraw(VkCommandBuffer cmd, const float *vertices, uint32_t vertexCount,
+                         const glm::mat4 &viewProj);
+
     // ---- 阴影映射（多光源：方向光/聚光灯用 2D shadow map，点光源用 cubemap） ----
     static constexpr int MAX_2D_SHADOW_MAPS = 4;  // 方向光 + 聚光灯（2D shadow map 数）
     static constexpr int MAX_POINT_SHADOWS = 1;   // 点光源（cubemap shadow map 数）
@@ -408,6 +419,14 @@ private:
     std::vector<VkImage> materialImages;
     std::vector<VkDeviceMemory> materialImageMemories;
     std::vector<VkImageView> materialImageViews;
+
+    // ---- 调试线框管线（M2） ----
+    VkPipelineLayout debugLayout = VK_NULL_HANDLE;   // 仅 push constant（mat4 viewProj），无描述集
+    VkPipeline debugPipeline = VK_NULL_HANDLE;
+    VkBuffer debugVertexBuffer = VK_NULL_HANDLE;     // host-visible，动态扩容
+    VkDeviceMemory debugVertexMemory = VK_NULL_HANDLE;
+    void *debugVertexMapped = nullptr;
+    uint32_t debugVertexCapacity = 0;                // 当前容量（顶点数）
 };
 
 } // namespace aster

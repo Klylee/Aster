@@ -1044,6 +1044,15 @@ void VulkanRenderAPI::SetShadowDebugView(int mode)
         sceneRenderer->SetShadowDebugView(mode);
 }
 
+void VulkanRenderAPI::DebugDrawLines(const std::vector<glm::vec3> &segments,
+                                     const glm::vec4 &color)
+{
+    if (!sceneRenderer)
+        return;
+    for (size_t i = 0; i + 1 < segments.size(); i += 2)
+        sceneRenderer->SubmitDebugLine(segments[i], segments[i + 1], color);
+}
+
 void VulkanRenderAPI::SetEnvironmentMap(const EnvironmentMap &env)
 {
     if (sceneRenderer)

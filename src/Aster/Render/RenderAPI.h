@@ -135,6 +135,17 @@ public:
         return nullptr;
     }
 
+    // 调试线框绘制（M2，物理调试可视化）：提交世界空间线段列表。
+    // segments 为成对顶点（a0,b0,a1,b1,...），全部使用同一 color。
+    //  - Vulkan 后端：记录到场景渲染器，主 pass 末尾统一绘制（深度测试开）；
+    //  - OpenGL 后端：默认 no-op。
+    // 需在每帧 BeginFrame（Clear）之后、Present 之前调用（如 Render 阶段）。
+    virtual void DebugDrawLines(const std::vector<glm::vec3> &segments, const glm::vec4 &color)
+    {
+        (void)segments;
+        (void)color;
+    }
+
     // 上传环境贴图数据（cubemap / irradiance / 预过滤 / BRDF LUT）。
     //  - Vulkan 后端：上传到 GPU 图像并更新描述符；
     //  - OpenGL 后端：上传到 GL cubemap / 2D 纹理。

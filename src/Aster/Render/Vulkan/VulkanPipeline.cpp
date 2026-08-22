@@ -51,6 +51,39 @@ static bool CreateUbo(VkDevice device, VkPhysicalDevice physicalDevice, VkDevice
     return true;
 }
 
+// 创建 host-visible + coherent 的顶点缓冲（调试线段用，动态扩容）
+static bool CreateDebugVertexBuffer(VkDevice device, VkPhysicalDevice physicalDevice,
+                                    VkDeviceSize size, VkBuffer &outBuffer,
+                                    VkDeviceMemory &outMemory, void *&outMapped)
+{
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device, &bufferInfo, nullptr, &outBuffer) != VK_SUCCESS)
+        return false;
+
+    VkMemoryRequirements memReq;
+    vkGetBufferMemoryRequirements(device, outBuffer, &memReq);
+    uint32_t memType = FindMemoryType(physicalDevice, memReq.memoryTypeBits,
+                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (memType == std::numeric_limits<uint32_t>::max())
+        return false;
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReq.size;
+    allocInfo.memoryTypeIndex = memType;
+    if (vkAllocateMemory(device, &allocInfo, nullptr, &outMemory) != VK_SUCCESS ||
+        vkBindBufferMemory(device, outBuffer, outMemory, 0) != VK_SUCCESS)
+        return false;
+
+    vkMapMemory(device, outMemory, 0, size, 0, &outMapped);
+    return true;
+}
+
 bool VulkanPipeline::Create(VkDevice device, VkPhysicalDevice physicalDevice,
                             VkRenderPass renderPass,
                             const std::string &vertSpv, const std::string &fragSpv,
@@ -806,6 +839,34 @@ void VulkanPipeline::Destroy()
         brdfImage = VK_NULL_HANDLE;
     }
     environmentReady_ = false;
+
+    // ---- 调试线框管线（M2） ----
+    if (debugVertexMapped)
+    {
+        vkUnmapMemory(device, debugVertexMemory);
+        debugVertexMapped = nullptr;
+    }
+    if (debugVertexMemory)
+    {
+        vkFreeMemory(device, debugVertexMemory, nullptr);
+        debugVertexMemory = VK_NULL_HANDLE;
+    }
+    if (debugVertexBuffer)
+    {
+        vkDestroyBuffer(device, debugVertexBuffer, nullptr);
+        debugVertexBuffer = VK_NULL_HANDLE;
+    }
+    debugVertexCapacity = 0;
+    if (debugPipeline)
+    {
+        vkDestroyPipeline(device, debugPipeline, nullptr);
+        debugPipeline = VK_NULL_HANDLE;
+    }
+    if (debugLayout)
+    {
+        vkDestroyPipelineLayout(device, debugLayout, nullptr);
+        debugLayout = VK_NULL_HANDLE;
+    }
 
     device = VK_NULL_HANDLE;
 }
@@ -3003,6 +3064,206 @@ void VulkanPipeline::RecordSkybox(VkCommandBuffer cmd, const glm::mat4 &invViewP
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(pc), &pc);
     vkCmdDraw(cmd, 3, 1, 0, 0);
+}
+
+// ---- 调试线框管线（M2，物理调试可视化） ----
+
+bool VulkanPipeline::CreateDebugPipeline(const std::string &shaderDir)
+{
+    if (!device)
+        return false;
+
+    std::vector<char> vertCode = ReadFile(shaderDir + "/debug.vert.spv");
+    std::vector<char> fragCode = ReadFile(shaderDir + "/debug.frag.spv");
+    if (vertCode.empty() || fragCode.empty())
+    {
+        std::cerr << "[VulkanPipeline] Debug shaders missing: "
+                  << "debug.vert.spv / debug.frag.spv" << std::endl;
+        return false;
+    }
+    VkShaderModule vertMod = CreateShaderModule(device, vertCode);
+    VkShaderModule fragMod = CreateShaderModule(device, fragCode);
+
+    // 独立管线布局：仅 push constant（mat4 viewProj），无描述集
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushRange.offset = 0;
+    pushRange.size = sizeof(glm::mat4);
+
+    VkPipelineLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount = 0;
+    layoutInfo.pSetLayouts = nullptr;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushRange;
+    if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &debugLayout) != VK_SUCCESS)
+    {
+        std::cerr << "[VulkanPipeline] Failed to create debug pipeline layout" << std::endl;
+        vkDestroyShaderModule(device, vertMod, nullptr);
+        vkDestroyShaderModule(device, fragMod, nullptr);
+        return false;
+    }
+
+    // 顶点输入：pos3 + color4（stride 28B）
+    VkVertexInputBindingDescription binding{};
+    binding.binding = 0;
+    binding.stride = 7 * sizeof(float);
+    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription attrs[2]{};
+    attrs[0].location = 0;
+    attrs[0].binding = 0;
+    attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attrs[0].offset = 0;
+    attrs[1].location = 1;
+    attrs[1].binding = 0;
+    attrs[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attrs[1].offset = 12;
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{};
+    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInput.vertexBindingDescriptionCount = 1;
+    vertexInput.pVertexBindingDescriptions = &binding;
+    vertexInput.vertexAttributeDescriptionCount = 2;
+    vertexInput.pVertexAttributeDescriptions = attrs;
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.sampleShadingEnable = VK_FALSE;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    // 深度测试开（被场景遮挡的线不显示），深度写关（线不影响后续绘制）
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_FALSE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE;
+
+    VkPipelineColorBlendAttachmentState blendAttachment{};
+    blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                     VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    blendAttachment.blendEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.logicOpEnable = VK_FALSE;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &blendAttachment;
+
+    VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = 2;
+    dynamicState.pDynamicStates = dynamicStates;
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vertMod;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fragMod;
+    stages[1].pName = "main";
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = stages;
+    pipelineInfo.pVertexInputState = &vertexInput;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = debugLayout;
+    pipelineInfo.renderPass = renderPass_;
+    pipelineInfo.subpass = 0;
+
+    VkPipeline p = VK_NULL_HANDLE;
+    VkResult r = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &p);
+    vkDestroyShaderModule(device, vertMod, nullptr);
+    vkDestroyShaderModule(device, fragMod, nullptr);
+    if (r != VK_SUCCESS || p == VK_NULL_HANDLE)
+    {
+        std::cerr << "[VulkanPipeline] Failed to create debug pipeline" << std::endl;
+        return false;
+    }
+    debugPipeline = p;
+    std::cout << "[VulkanPipeline] Debug pipeline created (LINE_LIST)" << std::endl;
+    return true;
+}
+
+void VulkanPipeline::RecordDebugDraw(VkCommandBuffer cmd, const float *vertices,
+                                     uint32_t vertexCount, const glm::mat4 &viewProj)
+{
+    if (!device || !debugPipeline || !vertices || vertexCount == 0)
+        return;
+
+    // 更新顶点缓冲（自动扩容）
+    const uint32_t needBytes = vertexCount * 7 * sizeof(float);
+    if (!debugVertexBuffer || debugVertexCapacity < vertexCount)
+    {
+        uint32_t newCap = (debugVertexCapacity == 0) ? 2048 : debugVertexCapacity * 2;
+        while (newCap < vertexCount)
+            newCap *= 2;
+
+        if (debugVertexMapped)
+        {
+            vkUnmapMemory(device, debugVertexMemory);
+            debugVertexMapped = nullptr;
+        }
+        if (debugVertexMemory)
+        {
+            vkFreeMemory(device, debugVertexMemory, nullptr);
+            debugVertexMemory = VK_NULL_HANDLE;
+        }
+        if (debugVertexBuffer)
+        {
+            vkDestroyBuffer(device, debugVertexBuffer, nullptr);
+            debugVertexBuffer = VK_NULL_HANDLE;
+        }
+        if (!CreateDebugVertexBuffer(device, physicalDevice,
+                                     (VkDeviceSize)newCap * 7 * sizeof(float),
+                                     debugVertexBuffer, debugVertexMemory, debugVertexMapped))
+        {
+            std::cerr << "[VulkanPipeline] Failed to grow debug vertex buffer" << std::endl;
+            debugVertexCapacity = 0;
+            return;
+        }
+        debugVertexCapacity = newCap;
+    }
+    std::memcpy(debugVertexMapped, vertices, needBytes);
+
+    // 绑定管线 + 顶点缓冲 + push constant + 绘制
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, debugPipeline);
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &debugVertexBuffer, &offset);
+    vkCmdPushConstants(cmd, debugLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                       sizeof(glm::mat4), &viewProj);
+    vkCmdDraw(cmd, vertexCount, 1, 0, 0);
 }
 
 } // namespace aster

@@ -132,6 +132,12 @@ public:
     // 需在 RecordPickMap 对应帧的 GPU 工作提交完成（fence 等待）后调用。
     int PickAt(int x, int y) const;
 
+    // ---- 调试线框绘制（M2，物理调试可视化） ----
+    // 提交一条世界空间线段（每帧 BeginFrame 后调用，Record 时统一绘制）。
+    void SubmitDebugLine(const glm::vec3 &a, const glm::vec3 &b, const glm::vec4 &color);
+    // 开关调试线绘制（false 时 Record 跳过）
+    void SetDebugDrawEnabled(bool e) { debugDrawEnabled_ = e; }
+
     bool IsReady() const { return pipeline != nullptr; }
 
 private:
@@ -179,6 +185,10 @@ private:
     float envYaw_ = 0.0f;         // 环境方位角（弧度）
     float envExposure_ = 1.0f;    // 曝光
     bool envToneMap_ = true;      // 是否 tone map
+
+    // ---- 调试线段（M2） ----
+    std::vector<float> debugVertices_; // pos3 + color4 交错（7 float / 顶点），BeginFrame 清空
+    bool debugDrawEnabled_ = true;     // 调试线绘制开关
 };
 
 } // namespace aster

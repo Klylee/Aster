@@ -169,6 +169,9 @@ bool VulkanSceneRenderer::Init(VkDevice device, VkPhysicalDevice physicalDevice,
     // 环境贴图描述符（占位资源 + 天空盒管线）。保证 mesh.frag 的 binding 6-10 始终有效。
     pipeline->CreateEnvironmentResources(queue, cmdPool, shaderDir);
 
+    // 调试线框管线（M2，物理调试可视化）。失败不影响主流程。
+    pipeline->CreateDebugPipeline(shaderDir);
+
     return true;
 }
 int VulkanSceneRenderer::RegisterMaterialTexture(VkQueue queue, VkCommandPool cmdPool,
@@ -200,6 +203,7 @@ void VulkanSceneRenderer::Shutdown()
         pipeline = nullptr;
     }
     drawCalls.clear();
+    debugVertices_.clear();
     device = VK_NULL_HANDLE;
 }
 
@@ -207,8 +211,22 @@ void VulkanSceneRenderer::BeginFrame()
 {
     drawCalls.clear();
     pickCalls.clear();
+    debugVertices_.clear();
     paramSlotCounter_ = 0;
     hasCustomParams_ = false;
+}
+
+// 提交一条世界空间调试线段（pos3 + color4 入顶点列表，Record 时统一绘制）
+void VulkanSceneRenderer::SubmitDebugLine(const glm::vec3 &a, const glm::vec3 &b,
+                                          const glm::vec4 &color)
+{
+    if (!debugDrawEnabled_)
+        return;
+    const float v[14] = {
+        a.x, a.y, a.z, color.r, color.g, color.b, color.a,
+        b.x, b.y, b.z, color.r, color.g, color.b, color.a,
+    };
+    debugVertices_.insert(debugVertices_.end(), std::begin(v), std::end(v));
 }
 
 // 拾取 ID 编码：把整数 ID 编码进 RGB（每通道 8bit），供 id.frag 输出到 id map。
@@ -616,6 +634,14 @@ void VulkanSceneRenderer::Record(VkCommandBuffer cmd, const glm::mat4 &view, con
                 call.mesh->Draw(cmd);
             }
         }
+    }
+
+    // ---- 调试线框（M2）：主 pass 末尾绘制（深度测试开，被场景遮挡的线不显示） ----
+    if (debugDrawEnabled_ && !debugVertices_.empty() && pipeline->GetDebugPipeline())
+    {
+        const glm::mat4 viewProj = yflipProj * view; // 与主 pass 同一 y 翻转约定
+        pipeline->RecordDebugDraw(cmd, debugVertices_.data(),
+                                  (uint32_t)(debugVertices_.size() / 7), viewProj);
     }
 }
 
